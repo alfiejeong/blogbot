@@ -9,11 +9,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # v3에서 v4로 업데이트
+      - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v5 # v4에서 v5로 업데이트
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12' # 3.10에서 3.12로 업그레이드
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run bot
