@@ -8,10 +8,10 @@ import json
 from datetime import datetime
 
 # --- [환경 변수 설정: 깃허브 Secrets와 연동] ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
-WP_APP_PW = os.environ.get("WP_APP_PW")
+GEMINI_API_KEY = os.environ.get("AIzaSyDGZSOJtyzBal8LznN7X_bxq94QEZrI1lI")
+NAVER_CLIENT_ID = os.environ.get("9pV91EnE8LuVP_L4wtnJ")
+NAVER_CLIENT_SECRET = os.environ.get("GOZfuEyXtb")
+WP_APP_PW = os.environ.get("8dh9 pVqC LLKb Xtan d4W9 NS3w")
 
 WP_USER = "alfiejeong"
 WP_URL = "https://alfiejeong.mycafe24.com/wp-json/wp/v2/posts"
