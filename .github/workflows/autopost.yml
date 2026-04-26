@@ -2,7 +2,7 @@ name: Autonomous Trend Post
 
 on:
   schedule:
-    - cron: '0 0,6,12 * * *' 
+    - cron: '0 0,6,12 * * *'
   workflow_dispatch:
 
 jobs:
@@ -13,13 +13,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12' # 3.10에서 3.12로 업그레이드
+          python-version: '3.12'
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
-          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           WP_APP_PW: ${{ secrets.WP_APP_PW }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: python autonomous_issue_bot.py
