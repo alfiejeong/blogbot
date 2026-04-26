@@ -32,9 +32,14 @@ DB_DATA_URL = (
 # 1회 실행당 최대 발행 글 수 (중복 제외 후)
 MAX_POSTS_PER_RUN = 3
 
-# 글 1편당 총 이미지 수 (hero 1장 + 본문 N-1장)
+# 글 1편당 총 이미지 수 (featured 1장 + 본문 N-1장)
 # 본문 350~500자 기준 3이 적정. 더 이미지 강조하려면 4, 더 글 위주면 2.
 TOTAL_IMAGES = 3
+
+# 워드프레스 테마가 단일 글 상단에 featured 이미지를 자동 렌더하는지 여부.
+# True (기본·대부분 테마): 본문 상단 hero 생략 → theme이 featured로 렌더 → 중복 방지
+# False: 테마가 featured 자동 표시 안 할 때만 → 본문 상단에 hero 직접 삽입
+THEME_AUTO_FEATURED_IMAGE = True
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 auth = HTTPBasicAuth(WP_USER, WP_APP_PW)
@@ -715,14 +720,22 @@ def distribute_images(html, body_images):
 
 
 def build_intro(kw, hero_img, category):
+    """
+    워드프레스 단일 글 페이지 상단에 hero 이미지가 두 번 나오는 문제 방지.
+    - THEME_AUTO_FEATURED_IMAGE=True (기본): 본문엔 텍스트만 → theme이 featured 자동 렌더 → 중복 X
+    - THEME_AUTO_FEATURED_IMAGE=False: 본문 상단에 hero figure 삽입 (테마 미지원 케이스)
+    """
     if category in ("restaurant", "hotspot"):
         lead = f"요즘 <b>{kw}</b> 다녀왔다는 분들 많더라구요 👀<br>실제 어떤지 짧게 정리했어요."
     else:
         lead = f"요즘 <b>{kw}</b> 검색이 많이 늘었더라구요 👀<br>왜 핫해졌는지 핵심만 빠르게."
-    return f"""
-{render_figure(hero_img)}
-<p style="font-size:17px;color:#333;line-height:1.7;">{lead}</p>
-"""
+
+    lead_p = f'<p style="font-size:17px;color:#333;line-height:1.7;">{lead}</p>'
+
+    if THEME_AUTO_FEATURED_IMAGE:
+        return "\n" + lead_p + "\n"
+    else:
+        return f"\n{render_figure(hero_img)}\n{lead_p}\n"
 
 
 # --- [9. 워드프레스 발행 ] ---
