@@ -245,20 +245,171 @@ def get_pexels(query, n=3):
         return []
 
 
-def collect_images(queries, target=6):
-    pool, seen = [], set()
-    qlist = list(queries) + ["aesthetic lifestyle", "modern korean street", "trendy cafe"]
-    for q in qlist:
-        if not q:
+def get_wikipedia_image(kw):
+    """한국어 위키백과 페이지의 대표 이미지 (인물·고유명사에 강함)"""
+    if not kw:
+        return []
+    try:
+        from urllib.parse import quote
+        url = f"https://ko.wikipedia.org/api/rest_v1/page/summary/{quote(kw)}"
+        r = requests.get(url, timeout=8, headers={"User-Agent": "alfiejeong-blog/1.0"})
+        if r.status_code != 200:
+            return []
+        data = r.json() or {}
+        thumb = data.get("originalimage") or data.get("thumbnail") or {}
+        src = thumb.get("source")
+        if not src:
+            return []
+        page_url = (data.get("content_urls", {}).get("desktop", {}) or {}).get("page", "#")
+        return [{
+            "url": src,
+            "alt": kw,
+            "credit": (
+                f'출처: <a href="{page_url}" rel="nofollow">한국어 위키백과</a> '
+                f'(CC BY-SA)'
+            ),
+        }]
+    except Exception as e:
+        log(f"Wikipedia 실패: {e}")
+        return []
+
+
+def get_wikimedia_search(query, n=2):
+    """Wikimedia Commons 파일 검색"""
+    if not query:
+        return []
+    try:
+        r = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query", "format": "json", "list": "search",
+                "srsearch": query, "srnamespace": "6", "srlimit": n,
+            },
+            timeout=8,
+            headers={"User-Agent": "alfiejeong-blog/1.0"},
+        )
+        results = (r.json() or {}).get("query", {}).get("search", [])
+        if not results:
+            return []
+        titles = "|".join(res["title"] for res in results)
+        r2 = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params={
+                "action": "query", "format": "json",
+                "titles": titles, "prop": "imageinfo",
+                "iiprop": "url|extmetadata", "iiurlwidth": "1200",
+            },
+            timeout=8,
+            headers={"User-Agent": "alfiejeong-blog/1.0"},
+        )
+        pages = (r2.json() or {}).get("query", {}).get("pages", {})
+        out = []
+        for _, page in pages.items():
+            ii = page.get("imageinfo")
+            if not ii:
+                continue
+            info = ii[0]
+            src = info.get("thumburl") or info.get("url")
+            if not src:
+                continue
+            if src.lower().endswith((".svg", ".pdf", ".tif", ".tiff")):
+                continue
+            meta = info.get("extmetadata", {}) or {}
+            artist_raw = (meta.get("Artist", {}) or {}).get("value", "Wikimedia contributor")
+            artist = re.sub(r"<[^>]+>", "", artist_raw)[:60]
+            lic = (meta.get("LicenseShortName", {}) or {}).get("value", "CC")
+            out.append({
+                "url": src,
+                "alt": query,
+                "credit": f"이미지: {artist} · Wikimedia Commons ({lic})",
+            })
+        return out
+    except Exception as e:
+        log(f"Wikimedia 실패: {e}")
+        return []
+
+
+def get_picsum_filler(kw, n=3):
+    """Picsum (Unsplash 미러) - 키 없이 항상 작동하는 최후 폴백"""
+    out, seeds = [], set()
+    while len(out) < n:
+        seed = random.randint(1, 1_000_000)
+        if seed in seeds:
             continue
-        for fetcher in (get_unsplash, get_pexels):
-            for img in fetcher(q, n=2):
-                if img["url"] in seen:
-                    continue
-                seen.add(img["url"])
-                pool.append(img)
-                if len(pool) >= target:
-                    return pool
+        seeds.add(seed)
+        out.append({
+            "url": f"https://picsum.photos/seed/{seed}/1200/800",
+            "alt": kw or "lifestyle photo",
+            "credit": '이미지: <a href="https://picsum.photos" rel="nofollow">Picsum</a> (Unsplash 미러)',
+        })
+    return out
+
+
+CATEGORY_ABSTRACT_QUERIES = {
+    "restaurant": [
+        "korean food close up", "trendy cafe interior",
+        "delicious meal plating", "coffee shop aesthetic",
+    ],
+    "hotspot": [
+        "seoul street life", "korea modern city", "trendy neighborhood",
+        "shopping district night",
+    ],
+    "general": [
+        "modern lifestyle korea", "newspaper article", "person on smartphone",
+        "city people walking", "broadcast studio", "press conference microphone",
+    ],
+}
+
+
+def collect_images(queries, kw, category, target=5):
+    """5단 폴백: Unsplash·Pexels(구체) → Unsplash·Pexels(추상) → 위키백과 → Wikimedia → Picsum"""
+    pool, seen = [], set()
+
+    def add(images):
+        for img in images:
+            if len(pool) >= target:
+                return
+            if not img or not img.get("url") or img["url"] in seen:
+                continue
+            seen.add(img["url"])
+            pool.append(img)
+
+    # Tier 1: API 키 + 구체 쿼리
+    for q in queries:
+        if len(pool) >= target:
+            break
+        add(get_unsplash(q, n=2))
+        add(get_pexels(q, n=2))
+    log(f"   [tier1 구체쿼리] {len(pool)}장")
+
+    # Tier 2: API 키 + 카테고리 추상 쿼리
+    if len(pool) < target:
+        for q in CATEGORY_ABSTRACT_QUERIES.get(category, []):
+            if len(pool) >= target:
+                break
+            add(get_unsplash(q, n=2))
+            add(get_pexels(q, n=2))
+        log(f"   [tier2 추상쿼리] {len(pool)}장")
+
+    # Tier 3: 한국어 위키백과 (키워드 직접)
+    if len(pool) < target:
+        add(get_wikipedia_image(kw))
+        log(f"   [tier3 위키백과] {len(pool)}장")
+
+    # Tier 4: Wikimedia Commons 검색
+    if len(pool) < target:
+        seeds_q = [kw] + list(queries[:2])
+        for q in seeds_q:
+            if len(pool) >= target:
+                break
+            add(get_wikimedia_search(q, n=2))
+        log(f"   [tier4 wikimedia] {len(pool)}장")
+
+    # Tier 5: Picsum 필러 (절대 실패 안 함)
+    if len(pool) < target:
+        add(get_picsum_filler(kw, n=target - len(pool) + 1))
+        log(f"   [tier5 picsum] {len(pool)}장")
+
     return pool
 
 
@@ -601,6 +752,16 @@ def post_to_wordpress(title, content, featured_id=None):
 def run_bot():
     log("🚀 자동 발행 봇 시작")
 
+    # ── API 키 사전 점검 (자주 빠뜨리는 부분)
+    if not GEMINI_API_KEY:
+        log("🔑 ❌ GEMINI_API_KEY 미설정 - Gemini 호출 전부 실패 예정")
+    if not WP_APP_PW:
+        log("🔑 ❌ WP_APP_PW 미설정 - 워드프레스 발행 실패 예정")
+    if not UNSPLASH_KEY:
+        log("🔑 ⚠️ UNSPLASH_ACCESS_KEY 미설정 - Unsplash 비활성 (폴백으로 작동)")
+    if not PEXELS_KEY:
+        log("🔑 ⚠️ PEXELS_API_KEY 미설정 - Pexels 비활성 (폴백으로 작동)")
+
     try:
         d_df = pd.read_csv(DB_DATA_URL)
         log(f"📊 주차 DB 로드 OK ({len(d_df)}건)")
@@ -628,14 +789,15 @@ def run_bot():
             log(f"   → 분류: category={info['category']} region={info.get('region')} "
                 f"is_person={info.get('is_person')} is_brand={info.get('is_brand_or_show')}")
 
-            # ③ 이미지 수집
+            # ③ 이미지 수집 (5단 폴백)
             target_imgs = random.randint(5, 6)
             queries = info.get("image_queries") or [kw]
-            images = collect_images(queries, target=target_imgs)
-            log(f"   → 이미지 {len(images)}장 확보")
+            images = collect_images(queries, kw=kw, category=info["category"], target=target_imgs)
+            log(f"   → 이미지 총 {len(images)}장 확보")
 
-            if len(images) < 2:
-                log("   ⛔ 이미지 부족, 스킵")
+            if len(images) < 1:
+                # Picsum 폴백까지 실패한다는 건 네트워크 자체가 죽은 거
+                log("   ⛔ 이미지 0장 (네트워크 이상), 스킵")
                 continue
 
             # ④ 본문/제목 생성
@@ -643,8 +805,11 @@ def run_bot():
             log(f"   → 제목: {title}")
 
             # ⑤ 이미지 배치
-            article_html = distribute_images(article_html, images[1:])
-            intro_html = build_intro(kw, images[0], info["category"])
+            #   - 이미지 1장만 있으면 인트로용으로만 쓰고 본문 [IMG] 토큰은 빈 문자열로 정리
+            hero_img = images[0]
+            body_imgs = images[1:] if len(images) > 1 else []
+            article_html = distribute_images(article_html, body_imgs)
+            intro_html = build_intro(kw, hero_img, info["category"])
 
             # ⑥ 카테고리별 거지주차 노출 분기
             if info["category"] in ("restaurant", "hotspot"):
