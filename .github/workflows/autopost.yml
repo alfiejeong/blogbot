@@ -2,16 +2,16 @@ name: Autonomous Trend Post
 
 on:
   schedule:
-    - cron: '0 0,6,12 * * *' # 한국 시간 09시, 15시, 21시 실행
+    - cron: '0 0,6,12 * * *' 
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4 # v3에서 v4로 업데이트
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # v4에서 v5로 업데이트
         with:
           python-version: '3.10'
       - name: Install dependencies
