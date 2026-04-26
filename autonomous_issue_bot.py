@@ -19,6 +19,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 WP_APP_PW = os.environ.get("WP_APP_PW")
 UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 PEXELS_KEY = os.environ.get("PEXELS_API_KEY")
+NAVER_CID = os.environ.get("NAVER_CLIENT_ID")
+NAVER_CSEC = os.environ.get("NAVER_CLIENT_SECRET")
 
 WP_USER = "alfiejeong"
 WP_BASE = "https://alfiejeong.mycafe24.com/wp-json/wp/v2"
@@ -66,26 +68,52 @@ def get_google_trends():
         return ["성수동 카페", "잠실 야구장", "강남역 맛집"]
 
 
-# --- [3. 중복 체크 (워드프레스 검색 API)] ---
-def is_recent_duplicate(kw):
-    """최근 글 중 제목에 동일 키워드가 들어간 글이 있으면 True"""
+# --- [3. 중복 체크 (토큰 단위, 7일 윈도)] ---
+def get_recent_post_titles(days=7, limit=100):
+    """최근 N일 발행된 글 제목을 한 번에 가져와 캐시"""
     try:
+        from datetime import datetime, timedelta, timezone
+        after = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         r = requests.get(
             f"{WP_BASE}/posts",
-            params={"search": kw, "per_page": 5, "_fields": "id,title"},
-            timeout=10,
+            params={
+                "per_page": min(limit, 100),
+                "after": after,
+                "_fields": "id,title",
+                "status": "publish",
+                "orderby": "date",
+                "order": "desc",
+            },
+            timeout=12,
         )
         if r.status_code == 200:
+            titles = []
             for p in r.json():
-                title_html = (p.get("title") or {}).get("rendered", "")
-                # HTML 태그 제거 후 키워드 포함 여부
-                title_plain = re.sub(r"<[^>]+>", "", title_html)
-                if kw in title_plain:
-                    return True
-        return False
+                t = re.sub(r"<[^>]+>", "", (p.get("title") or {}).get("rendered", ""))
+                titles.append(t)
+            return titles
     except Exception as e:
-        log(f"중복 체크 실패(통과): {e}")
-        return False
+        log(f"최근 글 조회 실패: {e}")
+    return []
+
+
+# 토큰화에서 무시할 짧은/의미 없는 단어
+_DEDUP_STOPWORDS = {"의", "그", "이", "저", "것", "수", "한", "두", "세", "곳", "때", "왜", "뭐", "와", "과"}
+
+
+def is_recent_duplicate(kw, recent_titles):
+    """
+    키워드를 토큰화한 뒤, 토큰 중 하나라도 최근 글 제목에 들어 있으면 중복.
+    예: kw='아디다스 캠페인', 최근 글 '아디다스, 무슨 일이래?' → '아디다스' 토큰 매칭 → True
+    """
+    tokens = [t for t in re.split(r"\s+", kw.strip()) if len(t) >= 2 and t not in _DEDUP_STOPWORDS]
+    if not tokens:
+        tokens = [kw.strip()]
+    for token in tokens:
+        for title in recent_titles:
+            if token and token in title:
+                return True
+    return False
 
 
 # --- [4. 키워드 분류 (Gemini + 휴리스틱 안전망)] ---
@@ -370,8 +398,268 @@ CATEGORY_ABSTRACT_QUERIES = {
 }
 
 
+# --- [국내 언론사 이미지 (저작권 안전 캡션만)] ---
+# 안전한 출처 패턴: 기업/공식 채널이 직접 배포한 이미지
+# - "OO 제공", "사진=OO" → 기업 보도자료/공식 배포
+# - "OOO 유튜브", "OOO SNS/인스타그램/페이스북/트위터" → 본인 공개 콘텐츠
+PRESS_SAFE_PATTERNS = [
+    r"제공",
+    r"사진\s*=",
+    r"유튜브",
+    r"SNS",
+    r"인스타그램",
+    r"페이스북",
+    r"트위터",
+    r"공식\s*홈페이지",
+    r"공식\s*계정",
+    r"보도자료",
+]
+
+# 위험 패턴: 매체 자체 저작권 → 절대 사용 금지
+# - "OOO 기자" / "매체명 DB" / "자료사진" / "자체촬영" / "본지" / "단독"
+PRESS_UNSAFE_PATTERNS = [
+    r"기자",
+    r"\bDB\b",
+    r"자료\s*사진",
+    r"자체\s*촬영",
+    r"본지",
+    r"단독\s*입수",
+]
+
+PRESS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def is_press_image_safe(caption):
+    """캡션이 안전 패턴 매칭이면 True. 위험 패턴 하나라도 있으면 무조건 False."""
+    if not caption:
+        return False
+    s = caption.strip()
+    for p in PRESS_UNSAFE_PATTERNS:
+        if re.search(p, s):
+            return False
+    for p in PRESS_SAFE_PATTERNS:
+        if re.search(p, s):
+            return True
+    return False
+
+
+def extract_credit_from_caption(caption):
+    """캡션에서 출처 표기만 깔끔하게 추출 (figcaption에 그대로 노출용)"""
+    if not caption:
+        return ""
+    m = re.search(r"사진\s*=\s*([^/,|·]+?)(?:[,|/·]|$)", caption)
+    if m:
+        return f"사진={m.group(1).strip()}"
+    m = re.search(r"([가-힣A-Za-z0-9 .·\-]+?)\s*제공", caption)
+    if m:
+        return f"{m.group(1).strip()} 제공"
+    m = re.search(r"([가-힣A-Za-z0-9 .·\-]+?)\s*(유튜브|SNS|인스타그램|페이스북|트위터)", caption)
+    if m:
+        return f"{m.group(1).strip()} {m.group(2)}"
+    return caption[:50]
+
+
+def search_naver_news(query, display=10):
+    """네이버 뉴스 검색 API (sort=sim: 정확도순)"""
+    if not (NAVER_CID and NAVER_CSEC):
+        return []
+    try:
+        r = requests.get(
+            "https://openapi.naver.com/v1/search/news.json",
+            params={"query": query, "display": display, "sort": "sim"},
+            headers={
+                "X-Naver-Client-Id": NAVER_CID,
+                "X-Naver-Client-Secret": NAVER_CSEC,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            log(f"   네이버 뉴스 응답 {r.status_code}")
+            return []
+        items = r.json().get("items", [])
+        urls = []
+        for it in items:
+            u = it.get("originallink") or it.get("link")
+            if u:
+                urls.append(u)
+        return urls
+    except Exception as e:
+        log(f"   네이버 뉴스 검색 실패: {e}")
+        return []
+
+
+def parse_press_article(url):
+    """기사 HTML → (img_url, caption) 후보 리스트"""
+    try:
+        r = requests.get(
+            url,
+            headers={
+                "User-Agent": PRESS_USER_AGENT,
+                "Accept-Language": "ko-KR,ko;q=0.9",
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+    except Exception:
+        return []
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return []
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return []
+
+    out = []
+    seen_src = set()
+
+    # 1) <figure><img> + <figcaption> 표준 패턴
+    for fig in soup.find_all("figure"):
+        img = fig.find("img")
+        if not img:
+            continue
+        src = img.get("data-src") or img.get("src") or ""
+        if not src.startswith("http") or src in seen_src:
+            continue
+        cap_el = fig.find("figcaption") or fig.find("em") or fig.find("span")
+        cap = cap_el.get_text(" ", strip=True) if cap_el else (img.get("alt") or "")
+        seen_src.add(src)
+        out.append((src, cap))
+
+    # 2) 일반 <img> + 인접 caption-like 텍스트 (네이버/다음 뉴스 형태)
+    for img in soup.find_all("img"):
+        src = img.get("data-src") or img.get("src") or ""
+        if not src.startswith("http") or src in seen_src:
+            continue
+        # 너무 작은 아이콘/로고 제외 (URL 힌트)
+        low = src.lower()
+        if any(x in low for x in ["logo", "icon", "btn_", "_thumb", "/thumb/"]):
+            continue
+        cap = img.get("alt", "") or ""
+        # 부모 텍스트에서 출처 단서 찾기
+        parent = img.parent
+        if parent:
+            txt = parent.get_text(" ", strip=True)
+            for ln in re.split(r"[\n\r]+", txt):
+                ln = ln.strip()
+                if any(k in ln for k in ("제공", "사진=", "유튜브", "SNS", "기자", "DB")):
+                    cap = ln
+                    break
+        if cap:
+            seen_src.add(src)
+            out.append((src, cap))
+    return out
+
+
+def rehost_image_to_wp(image_url, referer=None):
+    """
+    이미지 다운로드 → WP 미디어 라이브러리 업로드 → (wp_id, wp_url) 반환.
+    핫링크 차단된 언론사 이미지를 자체 도메인으로 옮긴다.
+    """
+    try:
+        h = {"User-Agent": PRESS_USER_AGENT}
+        if referer:
+            h["Referer"] = referer
+        rr = requests.get(image_url, headers=h, timeout=15)
+        # 5KB 미만은 보통 placeholder/로고
+        if rr.status_code != 200 or len(rr.content) < 5_000:
+            return None, None
+        ctype = rr.headers.get("Content-Type", "image/jpeg").lower()
+        if "png" in ctype:
+            ext = "png"
+        elif "webp" in ctype:
+            ext = "webp"
+        elif "gif" in ctype:
+            ext = "gif"
+        else:
+            ext = "jpg"
+        filename = f"press_{int(time.time())}_{random.randint(100, 999)}.{ext}"
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": ctype,
+        }
+        ru = requests.post(
+            f"{WP_BASE}/media",
+            auth=auth,
+            headers=headers,
+            data=rr.content,
+            timeout=40,
+        )
+        if ru.status_code in (200, 201):
+            j = ru.json()
+            return j.get("id"), j.get("source_url")
+        log(f"   재호스팅 응답 {ru.status_code}: {ru.text[:120]}")
+    except Exception as e:
+        log(f"   재호스팅 실패: {e}")
+    return None, None
+
+
+def collect_korean_press_images(kw, target=3):
+    """
+    0순위 이미지 소스: 국내 언론사 (저작권 안전 캡션만).
+    캡션이 위험 패턴('기자','DB','자료사진' 등)이면 무조건 차단,
+    안전 패턴('제공','사진=','유튜브/SNS')일 때만 다운로드 → WP 재호스팅 → 채택.
+    """
+    if not (NAVER_CID and NAVER_CSEC):
+        log("   ℹ️ Naver API 키 없음 → 국내 언론 이미지 비활성")
+        return []
+    try:
+        from bs4 import BeautifulSoup  # noqa: F401
+    except ImportError:
+        log("   ℹ️ beautifulsoup4 미설치 → 국내 언론 이미지 비활성")
+        return []
+
+    art_urls = search_naver_news(kw, display=10)
+    log(f"   📰 네이버 뉴스 후보 {len(art_urls)}건")
+    out = []
+    seen_src = set()
+    rejected_unsafe = 0
+    rejected_no_caption = 0
+    for art_url in art_urls:
+        if len(out) >= target:
+            break
+        try:
+            cands = parse_press_article(art_url)
+        except Exception as e:
+            log(f"   파싱 실패 {art_url[:60]}: {e}")
+            cands = []
+        for img_src, caption in cands:
+            if img_src in seen_src:
+                continue
+            seen_src.add(img_src)
+            if not caption:
+                rejected_no_caption += 1
+                continue
+            if not is_press_image_safe(caption):
+                rejected_unsafe += 1
+                continue
+            wp_id, wp_url = rehost_image_to_wp(img_src, referer=art_url)
+            if not wp_url:
+                continue
+            credit = extract_credit_from_caption(caption)
+            out.append({
+                "url": wp_url,
+                "alt": kw,
+                "credit": credit,
+                "wp_id": wp_id,
+                "source": "press",
+            })
+            log(f"   ✓ 언론 이미지 채택: {credit}")
+            if len(out) >= target:
+                break
+        time.sleep(0.4)
+    log(f"   📰 언론 결과: 채택 {len(out)}장 / 캡션없음 {rejected_no_caption} / "
+        f"위험출처 {rejected_unsafe}")
+    return out
+
+
 def collect_images(queries, kw, category, target=5):
-    """5단 폴백: Unsplash·Pexels(구체) → Unsplash·Pexels(추상) → 위키백과 → Wikimedia → Picsum"""
+    """0순위: 국내 언론(안전 캡션) → 5단 폴백(Unsplash·Pexels·위키·Picsum)"""
     pool, seen = [], set()
 
     def add(images):
@@ -382,6 +670,10 @@ def collect_images(queries, kw, category, target=5):
                 continue
             seen.add(img["url"])
             pool.append(img)
+
+    # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
+    add(collect_korean_press_images(kw, target=target))
+    log(f"   [tier0 국내언론] {len(pool)}장")
 
     # Tier 1: API 키 + 구체 쿼리
     for q in queries:
@@ -665,12 +957,118 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 # --- [8. 이미지 분배 (3중 폴백)] ---
 def render_figure(img):
     return (
-        f'<figure style="margin:24px 0;">'
+        f'<figure style="margin:40px 0 32px 0; padding:0;">'
         f'<img src="{img["url"]}" alt="{img["alt"]}" '
-        f'style="width:100%;border-radius:14px;display:block;" loading="lazy">'
-        f'<figcaption style="font-size:11px;color:#888;text-align:right;margin-top:6px;">'
+        f'style="width:100%;border-radius:14px;display:block;margin:0;" loading="lazy">'
+        f'<figcaption style="font-size:11px;color:#888;text-align:right;margin-top:10px;padding:0 4px;">'
         f'{img["credit"]}</figcaption>'
         f"</figure>"
+    )
+
+
+# --- [한국어 조사 자동 결정] ---
+_PARTICLE_PAIRS = {
+    # (with_jongseong, without_jongseong) — 받침 있을 때 / 없을 때
+    "이/가": ("이", "가"), "가/이": ("이", "가"),
+    "은/는": ("은", "는"), "는/은": ("은", "는"),
+    "을/를": ("을", "를"), "를/을": ("을", "를"),
+    "와/과": ("과", "와"), "과/와": ("과", "와"),
+    "이(가)": ("이", "가"), "가(이)": ("이", "가"),
+    "은(는)": ("은", "는"), "는(은)": ("은", "는"),
+    "을(를)": ("을", "를"), "를(을)": ("을", "를"),
+    "와(과)": ("과", "와"), "과(와)": ("과", "와"),
+}
+
+
+def _has_jongseong(c):
+    """한글 음절의 받침 유무. 한글 아닐 시 None"""
+    if not c:
+        return None
+    code = ord(c)
+    if 0xAC00 <= code <= 0xD7A3:
+        return (code - 0xAC00) % 28 != 0
+    return None
+
+
+def _jongseong_idx(c):
+    if not c:
+        return -1
+    code = ord(c)
+    if 0xAC00 <= code <= 0xD7A3:
+        return (code - 0xAC00) % 28
+    return -1
+
+
+def resolve_korean_particles(text):
+    """
+    AI가 남기는 '이/가', '은/는', '을/를', '와/과', '로/으로', 그리고 괄호형 '이(가)' 등을
+    앞 글자 받침에 따라 자동으로 정확한 조사 1개로 치환.
+    예: '새마을금고이/가' → '새마을금고가', '옥택연이/가' → '옥택연이'
+    """
+    # 일반 양자택일 패턴
+    for amb, (wj, woj) in _PARTICLE_PAIRS.items():
+        pattern = r"(\S)" + re.escape(amb)
+
+        def make_repl(with_jong=wj, without_jong=woj):
+            def _repl(m):
+                prev = m.group(1)
+                jong = _has_jongseong(prev)
+                if jong is True:
+                    return prev + with_jong
+                if jong is False:
+                    return prev + without_jong
+                # 한글이 아닌 경우(영문/숫자) — 받침 있는 쪽을 보수적으로 사용
+                return prev + with_jong
+            return _repl
+
+        text = re.sub(pattern, make_repl(), text)
+
+    # 로/으로 (ㄹ받침은 '로' 유지하는 특수 규칙)
+    def _resolve_ro(m):
+        prev = m.group(1)
+        idx = _jongseong_idx(prev)
+        if idx == -1:
+            return prev + "로"  # 비한글 기본
+        if idx == 0 or idx == 8:  # 받침 없음 or ㄹ받침
+            return prev + "로"
+        return prev + "으로"
+
+    for pat in [r"(\S)로/으로", r"(\S)으로/로", r"(\S)로\(으로\)", r"(\S)으로\(로\)"]:
+        text = re.sub(pat, _resolve_ro, text)
+
+    return text
+
+
+# --- [모바일 가독성 후처리] ---
+def split_paragraphs_for_mobile(html):
+    """
+    한 <p> 안에 여러 문장이 있으면 문장마다 별도 <p>로 분리해서
+    margin 사이로 자연스러운 행간 공백을 만든다.
+    """
+    def _split(m):
+        attrs = m.group(1) or ""
+        content = m.group(2).strip()
+        if not content:
+            return m.group(0)
+        # 마침표/물음표/느낌표 + 공백을 경계로 문장 분리
+        parts = re.split(r"(?<=[.!?])\s+", content)
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) <= 1:
+            return m.group(0)
+        return "".join(
+            f'<p{attrs} style="margin:0 0 14px 0;">{p}</p>' for p in parts
+        )
+
+    return re.sub(r"<p(\s[^>]*)?>(.*?)</p>", _split, html, flags=re.DOTALL)
+
+
+def wrap_post_for_mobile(html):
+    """전체 본문을 모바일 친화 래퍼로 감싸기"""
+    return (
+        '<div style="line-height:1.85; font-size:16px; color:#222; '
+        'word-break:keep-all; overflow-wrap:break-word;">'
+        f"{html}"
+        "</div>"
     )
 
 
@@ -740,6 +1138,9 @@ def build_intro(kw, hero_img, category):
 
 # --- [9. 워드프레스 발행 ] ---
 def upload_featured_image(img):
+    # 이미 WP 미디어로 재호스팅된 이미지(언론)면 id 그대로 재사용
+    if img.get("wp_id"):
+        return img["wp_id"]
     try:
         binary = requests.get(img["url"], timeout=12).content
         filename = f"hero_{int(time.time())}.jpg"
@@ -784,6 +1185,10 @@ def run_bot():
         log(f"⚠️ 주차 DB 로드 실패: {e}")
         d_df = None
 
+    # 최근 7일치 제목 1회만 캐싱 (토큰 단위 중복 차단용)
+    recent_titles = get_recent_post_titles(days=7, limit=100)
+    log(f"🗂  최근 7일 제목 {len(recent_titles)}개 캐시 (중복 차단용)")
+
     keywords = get_google_trends()
     posted_count = 0
 
@@ -794,8 +1199,8 @@ def run_bot():
 
         log(f"\n🔥 [{kw}] 처리 시작")
         try:
-            # ① 중복 체크
-            if is_recent_duplicate(kw):
+            # ① 중복 체크 (토큰 단위, 7일 윈도 + within-run)
+            if is_recent_duplicate(kw, recent_titles):
                 log(f"   ⏭️  최근에 이미 발행됨, 스킵")
                 continue
 
@@ -816,6 +1221,9 @@ def run_bot():
 
             # ④ 본문/제목 생성
             title, article_html = generate_post(kw, info)
+            # 한국어 조사 자동 결정 ("이/가" → "이" or "가")
+            title = resolve_korean_particles(title)
+            article_html = resolve_korean_particles(article_html)
             log(f"   → 제목: {title}")
 
             # ⑤ 이미지 배치
@@ -823,6 +1231,8 @@ def run_bot():
             hero_img = images[0]
             body_imgs = images[1:] if len(images) > 1 else []
             article_html = distribute_images(article_html, body_imgs)
+            # 모바일 가독성: 한 <p>에 여러 문장이 붙어 있으면 분리
+            article_html = split_paragraphs_for_mobile(article_html)
             intro_html = build_intro(kw, hero_img, info["category"])
 
             # ⑥ 카테고리별 거지주차 노출 분기
@@ -834,7 +1244,8 @@ def run_bot():
                 trailer = build_subtle_footer()
                 log("   → 일반 트렌드 → 푸터에 거지주차.com 링크만")
 
-            full_html = intro_html + article_html + trailer
+            # 모바일 래퍼(line-height/word-break/font-size)로 전체 감싸기
+            full_html = wrap_post_for_mobile(intro_html + article_html + trailer)
 
             # ⑦ 피처드 이미지 업로드 + 발행
             featured_id = upload_featured_image(images[0])
@@ -842,6 +1253,8 @@ def run_bot():
             if r.status_code in (200, 201):
                 log(f"🎉 [{kw}] 발행 완료 (id={r.json().get('id')})")
                 posted_count += 1
+                # within-run 중복 차단: 같은 회차 안에서 비슷한 키워드가 또 들어오면 스킵
+                recent_titles.insert(0, title)
             else:
                 log(f"❌ [{kw}] 발행 실패 {r.status_code}: {r.text[:200]}")
 
@@ -855,3 +1268,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+# end of file
