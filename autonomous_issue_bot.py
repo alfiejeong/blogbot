@@ -32,6 +32,10 @@ DB_DATA_URL = (
 # 1회 실행당 최대 발행 글 수 (중복 제외 후)
 MAX_POSTS_PER_RUN = 3
 
+# 글 1편당 총 이미지 수 (hero 1장 + 본문 N-1장)
+# 본문 350~500자 기준 3이 적정. 더 이미지 강조하려면 4, 더 글 위주면 2.
+TOTAL_IMAGES = 3
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 auth = HTTPBasicAuth(WP_USER, WP_APP_PW)
 
@@ -665,51 +669,49 @@ def render_figure(img):
     )
 
 
-def distribute_images(html, images):
-    used = [False] * len(images)
-    img_iter = iter(range(len(images)))
-
-    def repl_token(_m):
-        for i in img_iter:
-            used[i] = True
-            return render_figure(images[i])
-        return ""
-
-    html = re.sub(
-        r"\[\s*(?:IMG|image|이미지)\s*\d*\s*\]",
-        repl_token,
-        html,
-        flags=re.IGNORECASE,
-    )
-
-    remaining = [images[i] for i, u in enumerate(used) if not u]
-    if remaining:
-        h2_positions = [m.end() for m in re.finditer(r"</h2>", html, flags=re.IGNORECASE)]
-        new_html = ""
-        last = 0
-        for pos in h2_positions:
-            new_html += html[last:pos]
-            after = html[pos:pos + 60].lstrip().lower()
-            if not after.startswith("<figure") and remaining:
-                new_html += "\n" + render_figure(remaining.pop(0)) + "\n"
-            last = pos
-        new_html += html[last:]
-        html = new_html
-
-    if remaining:
-        gallery = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:24px 0;">'
-        for img in remaining:
-            gallery += (
-                f'<figure style="margin:0;">'
-                f'<img src="{img["url"]}" alt="{img["alt"]}" '
-                f'style="width:100%;border-radius:12px;display:block;" loading="lazy">'
-                f'<figcaption style="font-size:10px;color:#999;text-align:right;margin-top:4px;">'
-                f'{img["credit"]}</figcaption></figure>'
-            )
-        gallery += "</div>"
-        html += gallery
-
+def sanitize_gemini_html(html):
+    """Gemini가 임의로 넣은 이미지 태그·토큰 전부 제거 (코드가 위치 통제)"""
+    # [IMG] / [이미지] / [image] 토큰 제거
+    html = re.sub(r"\[\s*(?:IMG|image|이미지)\s*\d*\s*\]", "", html, flags=re.IGNORECASE)
+    # 자체 <img> / <figure> 제거 (hero 중복 차단)
+    html = re.sub(r"<figure[^>]*>.*?</figure>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<img\b[^>]*>", "", html, flags=re.IGNORECASE)
+    # 마크다운 이미지 ![..](..) 제거
+    html = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", html)
+    # 첫 H2 이전에 남은 흰 공간 정리
+    html = html.lstrip()
     return html
+
+
+def distribute_images(html, body_images):
+    """
+    본문 사진을 H2 직후에 배치. 단, 첫 H2(=hero 바로 밑)는 건너뛰어
+    도입부에 사진 두 장이 연달아 붙는 걸 방지.
+    """
+    html = sanitize_gemini_html(html)
+
+    if not body_images:
+        return html
+
+    h2_ends = [m.end() for m in re.finditer(r"</h2>", html, flags=re.IGNORECASE)]
+    if not h2_ends:
+        # H2가 아예 없으면 마지막에만 1장 붙임 (안전망)
+        return html + "\n" + render_figure(body_images[0])
+
+    # 첫 H2는 hero와 너무 가까우니 후보에서 제외
+    candidates = h2_ends[1:] if len(h2_ends) > 1 else h2_ends
+
+    # body_images 개수만큼 candidates 안에서 균등 분포
+    n = min(len(body_images), len(candidates))
+    indices = [int((i + 0.5) * len(candidates) / n) for i in range(n)]
+    chosen = [(candidates[i], body_images[k]) for k, i in enumerate(indices)]
+
+    # 뒤에서부터 삽입(앞 인덱스가 안 밀림)
+    chosen.sort(key=lambda x: -x[0])
+    out = html
+    for pos, img in chosen:
+        out = out[:pos] + "\n" + render_figure(img) + "\n" + out[pos:]
+    return out
 
 
 def build_intro(kw, hero_img, category):
@@ -789,11 +791,10 @@ def run_bot():
             log(f"   → 분류: category={info['category']} region={info.get('region')} "
                 f"is_person={info.get('is_person')} is_brand={info.get('is_brand_or_show')}")
 
-            # ③ 이미지 수집 (5단 폴백)
-            target_imgs = random.randint(5, 6)
+            # ③ 이미지 수집 (5단 폴백) — hero 1장 + 본문 (TOTAL_IMAGES-1)장
             queries = info.get("image_queries") or [kw]
-            images = collect_images(queries, kw=kw, category=info["category"], target=target_imgs)
-            log(f"   → 이미지 총 {len(images)}장 확보")
+            images = collect_images(queries, kw=kw, category=info["category"], target=TOTAL_IMAGES)
+            log(f"   → 이미지 총 {len(images)}장 확보 (목표 {TOTAL_IMAGES}장)")
 
             if len(images) < 1:
                 # Picsum 폴백까지 실패한다는 건 네트워크 자체가 죽은 거
