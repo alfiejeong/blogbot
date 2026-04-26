@@ -462,8 +462,11 @@ def extract_credit_from_caption(caption):
     return caption[:50]
 
 
-def search_naver_news(query, display=10):
-    """네이버 뉴스 검색 API (sort=sim: 정확도순)"""
+def fetch_naver_news_items(query, display=10):
+    """
+    네이버 뉴스 검색 → [{title, desc, url}, ...] 리스트 반환.
+    title/desc는 HTML 태그 제거 + 엔티티 디코딩.
+    """
     if not (NAVER_CID and NAVER_CSEC):
         return []
     try:
@@ -479,20 +482,65 @@ def search_naver_news(query, display=10):
         if r.status_code != 200:
             log(f"   네이버 뉴스 응답 {r.status_code}")
             return []
-        items = r.json().get("items", [])
-        urls = []
-        for it in items:
+        import html as _html
+        out = []
+        for it in r.json().get("items", []):
+            title = _html.unescape(re.sub(r"<[^>]+>", "", it.get("title", "") or "")).strip()
+            desc = _html.unescape(re.sub(r"<[^>]+>", "", it.get("description", "") or "")).strip()
             u = it.get("originallink") or it.get("link")
-            if u:
-                urls.append(u)
-        return urls
+            if title and u:
+                out.append({"title": title, "desc": desc, "url": u})
+        return out
     except Exception as e:
         log(f"   네이버 뉴스 검색 실패: {e}")
         return []
 
 
+def build_news_context(items, max_items=6, max_chars=1100):
+    """Gemini 프롬프트에 박을 '왜 이 키워드가 떴나' 컨텍스트 텍스트"""
+    if not items:
+        return ""
+    lines = []
+    total = 0
+    for it in items[:max_items]:
+        line = f"- [{it['title']}] {it['desc']}"
+        if total + len(line) > max_chars:
+            break
+        lines.append(line)
+        total += len(line)
+    return "\n".join(lines)
+
+
+# 메타/광고 이미지 차단 (URL/캡션 양쪽)
+PRESS_URL_BLACKLIST = [
+    "logo", "icon", "btn_", "/thumb", "_thumb", "favicon", "blank.gif",
+    "spacer", "/ad/", "/ads/", "ad_", "_ad.", "banner", "promo",
+    "author", "profile", "avatar", "category", "/footer", "/header",
+    "/nav/", "widget", "share_", "sns_", "social_", "subscribe",
+    "good_conect", "good-conect", "goodconnect", "good_connect",
+]
+PRESS_CAPTION_META_BLACKLIST = [
+    "작성자", "Uncategorized", "이전 글", "다음 글", "관련 기사",
+    "Posted by", "Posted in", "Author", "댓글", "공유하기",
+    "Good Connect", "Good Conect", "이용약관", "신청 문의",
+    "구독", "광고문의", "보러가기",
+]
+
+
+def is_meta_or_ad_image(src, caption):
+    low = (src or "").lower()
+    for tok in PRESS_URL_BLACKLIST:
+        if tok in low:
+            return True
+    if caption:
+        for tok in PRESS_CAPTION_META_BLACKLIST:
+            if tok in caption:
+                return True
+    return False
+
+
 def parse_press_article(url):
-    """기사 HTML → (img_url, caption) 후보 리스트"""
+    """기사 HTML → (img_url, caption) 후보 리스트. 본문 컨테이너 한정."""
     try:
         r = requests.get(
             url,
@@ -515,11 +563,47 @@ def parse_press_article(url):
     except Exception:
         return []
 
+    # 광고/사이드바/작성자 박스/네비/푸터 등 본문 외 영역 사전 제거
+    for sel in [
+        "header", "footer", "nav", "aside", "form", "noscript",
+        ".ad", ".ads", ".advertisement", ".banner", ".sidebar",
+        ".related", ".comment", ".comments", ".share", ".sns",
+        ".author", ".byline", ".profile", ".widget", ".navigation",
+        "[class*='ads']", "[class*='banner']", "[class*='widget']",
+        "[class*='author']", "[class*='related']", "[class*='social']",
+        "[id*='ads']", "[id*='banner']", "[id*='author']",
+        "[id*='related']",
+    ]:
+        try:
+            for el in soup.select(sel):
+                el.decompose()
+        except Exception:
+            pass
+
+    # 본문 컨테이너 후보 (한국 주요 매체 + 일반 패턴)
+    content_root = None
+    for sel in [
+        "article",
+        "#articleBody", "#article-body", "#articleBodyContents",
+        "#newsEndContents", "#dic_area", "#contents",
+        ".article-body", ".article_view", ".news_view", ".view_text",
+        ".article_txt", ".article_cont", "#main_content",
+    ]:
+        try:
+            el = soup.select_one(sel)
+            if el:
+                content_root = el
+                break
+        except Exception:
+            pass
+    if content_root is None:
+        content_root = soup
+
     out = []
     seen_src = set()
 
-    # 1) <figure><img> + <figcaption> 표준 패턴
-    for fig in soup.find_all("figure"):
+    # 1) <figure><img> + <figcaption> 표준 패턴 (본문 한정)
+    for fig in content_root.find_all("figure"):
         img = fig.find("img")
         if not img:
             continue
@@ -531,17 +615,12 @@ def parse_press_article(url):
         seen_src.add(src)
         out.append((src, cap))
 
-    # 2) 일반 <img> + 인접 caption-like 텍스트 (네이버/다음 뉴스 형태)
-    for img in soup.find_all("img"):
+    # 2) 일반 <img> + 인접 caption-like 텍스트
+    for img in content_root.find_all("img"):
         src = img.get("data-src") or img.get("src") or ""
         if not src.startswith("http") or src in seen_src:
             continue
-        # 너무 작은 아이콘/로고 제외 (URL 힌트)
-        low = src.lower()
-        if any(x in low for x in ["logo", "icon", "btn_", "_thumb", "/thumb/"]):
-            continue
         cap = img.get("alt", "") or ""
-        # 부모 텍스트에서 출처 단서 찾기
         parent = img.parent
         if parent:
             txt = parent.get_text(" ", strip=True)
@@ -566,8 +645,8 @@ def rehost_image_to_wp(image_url, referer=None):
         if referer:
             h["Referer"] = referer
         rr = requests.get(image_url, headers=h, timeout=15)
-        # 5KB 미만은 보통 placeholder/로고
-        if rr.status_code != 200 or len(rr.content) < 5_000:
+        # 15KB 미만은 보통 placeholder/로고/광고 배너
+        if rr.status_code != 200 or len(rr.content) < 15_000:
             return None, None
         ctype = rr.headers.get("Content-Type", "image/jpeg").lower()
         if "png" in ctype:
@@ -599,14 +678,13 @@ def rehost_image_to_wp(image_url, referer=None):
     return None, None
 
 
-def collect_korean_press_images(kw, target=3):
+def collect_korean_press_images(items, kw, target=3):
     """
     0순위 이미지 소스: 국내 언론사 (저작권 안전 캡션만).
-    캡션이 위험 패턴('기자','DB','자료사진' 등)이면 무조건 차단,
-    안전 패턴('제공','사진=','유튜브/SNS')일 때만 다운로드 → WP 재호스팅 → 채택.
+    items: fetch_naver_news_items() 결과 (재사용해서 API 절약).
+    캡션 위험 패턴 / 메타·광고 URL·캡션 / 다운로드 실패 모두 차단.
     """
-    if not (NAVER_CID and NAVER_CSEC):
-        log("   ℹ️ Naver API 키 없음 → 국내 언론 이미지 비활성")
+    if not items:
         return []
     try:
         from bs4 import BeautifulSoup  # noqa: F401
@@ -614,10 +692,11 @@ def collect_korean_press_images(kw, target=3):
         log("   ℹ️ beautifulsoup4 미설치 → 국내 언론 이미지 비활성")
         return []
 
-    art_urls = search_naver_news(kw, display=10)
-    log(f"   📰 네이버 뉴스 후보 {len(art_urls)}건")
+    art_urls = [it["url"] for it in items]
+    log(f"   📰 네이버 뉴스 후보 {len(art_urls)}건 (이미지 수집)")
     out = []
     seen_src = set()
+    rejected_meta_ad = 0
     rejected_unsafe = 0
     rejected_no_caption = 0
     for art_url in art_urls:
@@ -632,6 +711,11 @@ def collect_korean_press_images(kw, target=3):
             if img_src in seen_src:
                 continue
             seen_src.add(img_src)
+            # 1차: 메타/광고 차단 (URL/캡션 블랙리스트)
+            if is_meta_or_ad_image(img_src, caption):
+                rejected_meta_ad += 1
+                continue
+            # 2차: 캡션 안전성
             if not caption:
                 rejected_no_caption += 1
                 continue
@@ -653,12 +737,12 @@ def collect_korean_press_images(kw, target=3):
             if len(out) >= target:
                 break
         time.sleep(0.4)
-    log(f"   📰 언론 결과: 채택 {len(out)}장 / 캡션없음 {rejected_no_caption} / "
-        f"위험출처 {rejected_unsafe}")
+    log(f"   📰 언론 결과: 채택 {len(out)} / 메타·광고차단 {rejected_meta_ad} / "
+        f"위험출처 {rejected_unsafe} / 캡션없음 {rejected_no_caption}")
     return out
 
 
-def collect_images(queries, kw, category, target=5):
+def collect_images(queries, kw, category, target=5, news_items=None):
     """0순위: 국내 언론(안전 캡션) → 5단 폴백(Unsplash·Pexels·위키·Picsum)"""
     pool, seen = [], set()
 
@@ -672,7 +756,8 @@ def collect_images(queries, kw, category, target=5):
             pool.append(img)
 
     # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
-    add(collect_korean_press_images(kw, target=target))
+    if news_items:
+        add(collect_korean_press_images(news_items, kw, target=target))
     log(f"   [tier0 국내언론] {len(pool)}장")
 
     # Tier 1: API 키 + 구체 쿼리
@@ -806,7 +891,7 @@ TITLE_STYLES_PLACE = [
 ]
 
 
-def generate_post(kw, info):
+def generate_post(kw, info, news_ctx=""):
     cat = info["category"]
 
     # 매번 다른 제목 스타일 강제
@@ -814,6 +899,24 @@ def generate_post(kw, info):
         style_label, style_example = random.choice(TITLE_STYLES_PLACE)
     else:
         style_label, style_example = random.choice(TITLE_STYLES_GENERAL)
+
+    # 뉴스 컨텍스트 블록 (있으면 prompt에 강제 주입)
+    if news_ctx:
+        ctx_block = f"""
+[**최신 뉴스 발췌 — 이 정보만 기반으로 작성. 이 안에 없는 사실은 만들지 말 것.**]
+{news_ctx}
+
+[작성 원칙 — 절대 어기지 말 것]
+- 위 뉴스에 등장한 구체적 사실(이름·날짜·전적·순위·출연작·발표 내용·인용구 등)만 사용.
+- 일반론·기업 소개·연예인 약력 등 추상적인 백과사전식 서술 금지.
+- 키워드 동음이의어 주의: 위 뉴스 맥락이 다루는 대상으로만 글을 쓸 것.
+  (예: "kt"가 야구단 기사면 야구만, 통신사 기사면 통신만. 둘 섞지 말 것.)
+- 뉴스에 안 나온 다른 작품/경기/사건으로 빠지지 말 것.
+- 매체 본문을 그대로 베끼지 말고 자기 말로 풀어쓰기 (저작권 회피).
+- 모르는 부분은 단정하지 말고 "공식 발표로는 ~라고 한다"처럼.
+"""
+    else:
+        ctx_block = ""
 
     if cat in ("restaurant", "hotspot"):
         role = "맛집·핫플 정보 블로거" if cat == "restaurant" else "동네 핫플 가이드 블로거"
@@ -823,7 +926,7 @@ def generate_post(kw, info):
             else "어디 위치고 뭐가 있고 무엇이 매력 포인트고 누구랑 가면 좋은지"
         )
         prompt = f"""너는 한국의 {role}야. 키워드 "{kw}"로 모바일 최적화 블로그 글을 써줘.
-
+{ctx_block}
 [목표]
 - 정보·후기 톤. 광고 글처럼 보이면 안 됨.
 - 본문 끝에 별도 "주차 팁" 박스가 따로 들어가니, 본문에는 주차 얘기 한 줄만 살짝.
@@ -868,38 +971,38 @@ H2 헤딩 4개. 각 H2 직후에 정확히 [IMG] 한 줄.
             if info.get("is_person") else ""
         )
         prompt = f"""너는 한국의 트렌드 정보 블로거야. 키워드 "{kw}"로 모바일 최적화 블로그 글을 써줘.
-
+{ctx_block}
 [목표]
 - 사람들이 "이게 왜 핫하지?" 검색 → 클릭 → 만족하고 가는 정보성 글.
 - 검색 유입 + 체류 시간 목적. 광고/홍보 단어 금지.
 - **이 키워드는 장소가 아니야. "주차", "주차장", "주차 팁" 같은 단어 절대 본문에 쓰지 말 것.**
 
-[필수 콘텐츠]
-1) 이게 무엇/누구인지 한 줄 요약
-2) 왜 지금 화제가 됐는지
-3) 핵심 포인트
-4) 앞으로 어떻게 될지
+[필수 콘텐츠 — 위 뉴스 발췌만 근거로]
+1) 이게 무엇/누구인지 한 줄 (뉴스 맥락 그대로)
+2) 왜 지금 화제가 됐는지 — **뉴스에 나온 구체 사실** (전적·순위·출연·발표·발언 등) 인용
+3) 핵심 포인트 — 뉴스에 등장한 숫자·일정·인물 발언 등 디테일
+4) 앞으로 어떻게 될지 — 뉴스 안에 단서가 있을 때만, 없으면 "지켜봐야겠더라구요" 정도로
 
 [톤 & 분량 - 모바일 최적화 절대 원칙]
 - 친한 친구 카톡 톤.
 - **한 문단은 무조건 1~2문장. 절대 3문장 넘지 말 것.**
 - 줄바꿈 자주.
-- **본문 전체 350~500자 (절대 600자 안 넘게). 핵심만.**
+- **본문 전체 400~600자.** 일반론 채우지 말고 뉴스 디테일로 채울 것.
 - 확실하지 않은 건 "~라고 하더라구요", "~인 듯".
 - {person_warn}
 
 [구조 - 정확히]
 H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 형식:
-<h2>이모지 + "{kw}이/가 뭔데?" 같은 도입</h2>
+<h2>이모지 + 도입 (뉴스 맥락 한 줄 요약)</h2>
 [IMG]
-한두 문장.
+한두 문장 (구체 사실).
 
-<h2>이모지 + 화제가 된 배경</h2>
+<h2>이모지 + 화제가 된 배경 (뉴스 인용)</h2>
 [IMG]
-한두 문장.
+한두 문장 (숫자·이름·날짜).
 
-<h2>이모지 + 핵심 포인트</h2>
+<h2>이모지 + 핵심 포인트 (뉴스 디테일)</h2>
 [IMG]
 한두 문장.
 
@@ -1209,9 +1312,22 @@ def run_bot():
             log(f"   → 분류: category={info['category']} region={info.get('region')} "
                 f"is_person={info.get('is_person')} is_brand={info.get('is_brand_or_show')}")
 
-            # ③ 이미지 수집 (5단 폴백) — hero 1장 + 본문 (TOTAL_IMAGES-1)장
+            # ③ 이슈 컨텍스트 수집 (네이버 뉴스) — 글의 사실 근거
+            news_items = fetch_naver_news_items(kw, display=10)
+            news_ctx = build_news_context(news_items)
+            log(f"   → 뉴스 컨텍스트: {len(news_items)}건 / {len(news_ctx)}자")
+
+            # general 카테고리는 뉴스 컨텍스트가 빈약하면 발행 스킵 (낚시 글 방지)
+            if info["category"] == "general" and len(news_ctx) < 200:
+                log("   ⏭️  뉴스 컨텍스트 부족 → 사실 기반 작성 불가, 스킵")
+                continue
+
+            # ④ 이미지 수집 (Tier 0: news_items 재사용, 메타·광고 차단)
             queries = info.get("image_queries") or [kw]
-            images = collect_images(queries, kw=kw, category=info["category"], target=TOTAL_IMAGES)
+            images = collect_images(
+                queries, kw=kw, category=info["category"],
+                target=TOTAL_IMAGES, news_items=news_items,
+            )
             log(f"   → 이미지 총 {len(images)}장 확보 (목표 {TOTAL_IMAGES}장)")
 
             if len(images) < 1:
@@ -1219,8 +1335,8 @@ def run_bot():
                 log("   ⛔ 이미지 0장 (네트워크 이상), 스킵")
                 continue
 
-            # ④ 본문/제목 생성
-            title, article_html = generate_post(kw, info)
+            # ⑤ 본문/제목 생성 (뉴스 컨텍스트 기반)
+            title, article_html = generate_post(kw, info, news_ctx)
             # 한국어 조사 자동 결정 ("이/가" → "이" or "가")
             title = resolve_korean_particles(title)
             article_html = resolve_korean_particles(article_html)
