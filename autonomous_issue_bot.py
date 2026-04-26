@@ -1,74 +1,78 @@
 import os
-import pandas as pd
-import google.generativeai as genai
+from google import genai # 최신 2026년형 SDK
 import requests
 from requests.auth import HTTPBasicAuth
 import time
 
-# --- [디버깅 로그 함수] ---
 def log(msg):
     print(f"DEBUG: {msg}")
 
 # --- [설정 정보] ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 WP_APP_PW = os.environ.get("WP_APP_PW")
 WP_USER = "alfiejeong"
 WP_URL = "https://alfiejeong.mycafe24.com/wp-json/wp/v2/posts"
 
-log(f"API Key 확인: {'보유' if GEMINI_API_KEY else '미보유'}")
-log(f"WP 비밀번호 확인: {'보유' if WP_APP_PW else '미보유'}")
+log("🚀 2026년형 자율 트렌드 엔진 가동!")
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+if not GEMINI_API_KEY or not WP_APP_PW:
+    log("🚨 에러: API 키 또는 워드프레스 비밀번호가 없습니다. Secrets 설정을 확인하세요.")
+    exit(1)
+
+# 최신 클라이언트 설정
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_ID = "gemini-2.0-flash" # 2026년 가장 효율적인 모델
 
 def get_trending_keywords():
-    log("트렌드 키워드 수집 시도 중...")
+    log("🔍 실시간 트렌드 분석 중...")
     try:
-        prompt = "지금 한국에서 가장 화제가 되는 구체적인 키워드 3개를 선정해서 '키워드1, 키워드2, 키워드3' 형식으로만 답해줘."
-        res = model.generate_content(prompt)
-        kws = [k.strip() for k in res.text.split(',')]
-        log(f"수집된 키워드: {kws}")
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents="지금 한국 포털 실시간 인기 검색어 상위 3개를 '키워드1, 키워드2, 키워드3' 형식으로 뽑아줘."
+        )
+        kws = [k.strip() for k in response.text.split(',')]
+        log(f"✅ 발견된 핫 키워드: {kws}")
         return kws
     except Exception as e:
-        log(f"키워드 수집 실패: {e}")
+        log(f"❌ 키워드 수집 실패: {e}")
         return []
 
-def run_autonomous_bot():
+def run_bot():
     keywords = get_trending_keywords()
     if not keywords:
-        log("작업할 키워드가 없어 종료합니다.")
+        log("⏭️ 분석할 키워드가 없어 종료합니다.")
         return
 
     for kw in keywords:
-        log(f"[{kw}] 포스팅 작업 시작")
-        
-        # 원고 생성 (이전과 동일하지만 로그 추가)
+        log(f"🔥 [{kw}] 콘텐츠 제작 시작!")
         try:
-            prompt = f"도시 깍쟁이 말투로 {kw} 이슈를 1000자 이상 설명해줘. [이미지] 태그 포함 필수."
-            res = model.generate_content(prompt)
+            # 깍쟁이 원고 생성
+            res = client.models.generate_content(
+                model=MODEL_ID,
+                contents=f"도도한 깍쟁이 인플루언서 말투로 '{kw}' 이슈의 원인과 배경을 1200자 이상 아주 상세하게 설명해줘. 중간에 [이미지] 태그를 꼭 넣어줘."
+            )
             content = res.text.replace('\n', '<br>')
-            log(f"[{kw}] 원고 생성 완료 (길이: {len(content)})")
+            log(f"📝 원고 생성 완료 (길이: {len(content)})")
+            
+            # 워드프레스 전송
+            payload = {
+                "title": f"💅 {kw}, 대체 왜 난리야? 깍쟁이가 싹 정리해줄게! ✨",
+                "content": content,
+                "status": "publish"
+            }
+            log(f"📮 워드프레스 전송 중...")
+            wp_res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_APP_PW), json=payload)
+            
+            if wp_res.status_code == 201:
+                log(f"🎉 [{kw}] 블로그 발행 성공!")
+            else:
+                log(f"❌ 전송 실패: {wp_res.status_code} - {wp_res.text}")
+                
         except Exception as e:
-            log(f"[{kw}] 원고 생성 실패: {e}")
-            continue
-
-        # 워드프레스 전송
-        log(f"[{kw}] 워드프레스 전송 시도...")
-        payload = {
-            "title": f"💅 {kw}가 왜 난리야? 깍쟁이가 정리해드림! ✨",
-            "content": content,
-            "status": "publish"
-        }
-        res = requests.post(WP_URL, auth=HTTPBasicAuth(WP_USER, WP_APP_PW), json=payload)
+            log(f"🚨 작업 중 에러 발생: {e}")
         
-        if res.status_code == 201:
-            log(f"✅ [{kw}] 포스팅 성공!")
-        else:
-            log(f"❌ [{kw}] 전송 실패 (상태코드: {res.status_code}, 메시지: {res.text})")
-        
-        time.sleep(5)
+        time.sleep(10)
 
 if __name__ == "__main__":
-    run_autonomous_bot()
+    run_bot()
+    log("🏁 모든 작업 완료!")
