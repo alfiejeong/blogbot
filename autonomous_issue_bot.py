@@ -997,6 +997,29 @@ def caption_matches_keyword(caption, kw):
     return any(t in caption for t in tokens)
 
 
+# 매니지먼트사/기획사/소속사 단서 — 이게 캡션에 있으면 본인 사진 가능성 매우 높음
+MANAGEMENT_COMPANY_HINTS = [
+    "엔터테인먼트", "엔터", "매니지먼트", "ENT", "기획사",
+    "크리에이터스", "크리에이더스", "스튜디오", "컴퍼니",
+    "뮤직", "레코드", "프로덕션", "에이전시",
+    "패밀리", "팩토리",
+]
+
+
+def is_management_company_caption(caption):
+    """
+    캡션에 매니지먼트/기획사/소속사 단서가 있으면 True.
+    인물 키워드 매칭 검사를 면제하는 화이트리스트.
+    예: '700크리에이더스 제공', 'HYBE 엔터테인먼트 제공', 'SM엔터테인먼트 제공'
+    """
+    if not caption:
+        return False
+    for hint in MANAGEMENT_COMPANY_HINTS:
+        if hint in caption:
+            return True
+    return False
+
+
 def parse_press_article(url):
     """기사 HTML → (img_url, caption) 후보 리스트. 본문 컨테이너 한정."""
     try:
@@ -1182,9 +1205,12 @@ def collect_korean_press_images(items, kw, target=3, require_keyword_match=False
                 rejected_unsafe += 1
                 continue
             # 3차: 인물 키워드면 캡션에 본인 이름이 있어야 채택
+            #      단, 매니지먼트사/기획사 제공 캡션은 면제 (본인 사진 가능성 매우 높음)
             if require_keyword_match and not caption_matches_keyword(caption, kw):
-                rejected_no_kw_match += 1
-                continue
+                if not is_management_company_caption(caption):
+                    rejected_no_kw_match += 1
+                    continue
+                log(f"   ✓ 매니지먼트사 캡션 → 인물 매칭 면제: {caption[:40]}")
             wp_id, wp_url = rehost_image_to_wp(img_src, referer=art_url)
             if not wp_url:
                 continue
@@ -1470,22 +1496,20 @@ def generate_post(kw, info, news_ctx=""):
 - 단정적 평가·사생활·루머 금지. 확정 안 된 건 '~로 알려졌다'.
 - **'정의로운', '옳은', '잘못된', '당연한' 같은 가치 판단어 금지.**
 
-[구조 — 정확히, H2 4개 + 각 H2 직후 [IMG] 한 줄]
-<h2>📌 무슨 일이야? (한 줄 요약)</h2>
-[IMG]
-한두 문장.
+[H2 4단 흐름 — 매번 다른 표현으로 새로 작성, 절대 같은 텍스트 반복 금지]
+1) 무슨 일/누구의 어떤 경기인지 한 줄
+   예시 톤(그대로 쓰지 말 것): "⚾ 어제 그 경기 봤어?", "👀 무슨 일이야?", "🔥 ○○ 진짜 미쳤다"
+2) 왜 지금 화제인지 — 스코어·기록·전적 인용
+   예시 톤: "📊 이 기록 봤어?", "🤯 결과가 진짜", "💥 도대체 어떻게 된 거?"
+3) 팬·사람들 반응
+   예시 톤: "💬 팬들 반응", "🗣 댓글 반응 모음", "🔥 SNS 분위기"
+4) 다음 경기/관전 포인트
+   예시 톤: "📅 다음 경기는?", "👉 앞으로 관전 포인트", "🎯 이제 봐야 할 건"
 
-<h2>🔥 왜 핫할까? (스코어·기록 인용)</h2>
-[IMG]
-한두 문장.
-
-<h2>💬 팬·사람들 반응</h2>
-[IMG]
-한두 문장.
-
-<h2>📅 앞으로는? (다음 경기·관전 포인트)</h2>
-[IMG]
-한두 문장.
+[H2 작성 절대 원칙]
+- **H2 텍스트에 메타 설명 괄호 절대 금지**: "(한 줄 요약)", "(뉴스 인용)", "(스코어 인용)" 같은 가이드 괄호 출력 금지.
+- 위 예시는 톤 참고용. 매번 새로운 표현으로.
+- H2 4개 + 각 H2 직후 [IMG] 한 줄 + 본문 한두 문장 구조 유지.
 
 [제목 스타일]
 반드시 **"{style_label}"** 으로 작성. 예시 톤: {style_example}
@@ -1525,22 +1549,20 @@ def generate_post(kw, info, news_ctx=""):
 - 이모지는 H2 헤딩에만 1개씩.
 - {person_warn}
 
-[구조 — 정확히, H2 4개 + 각 H2 직후 [IMG] 한 줄]
-<h2>📌 무슨 일이야? (한 줄 요약)</h2>
-[IMG]
-한두 문장.
+[H2 4단 흐름 — 매번 다른 표현으로 새로 작성, 절대 같은 텍스트 반복 금지]
+1) 무슨 일/이슈인지 한 줄로 던지는 도입
+   예시 톤(그대로 쓰지 말 것): "📌 ○○ 갑자기 떴는데", "👀 무슨 얘기야?", "🤨 그래서 뭐가 화제냐면"
+2) 왜 지금 화제가 됐는지 — 뉴스 속 구체 사실 인용
+   예시 톤: "🔥 도대체 무슨 일이?", "🤔 이게 왜 떠?", "💥 핵심 한 줄"
+3) 사람들 반응 (찬반·갑론을박·중립)
+   예시 톤: "💬 댓글 반응이 진짜", "🗣 사람들은 어떻게 봤을까", "👥 반응이 극과 극"
+4) 앞으로 어떻게 될지
+   예시 톤: "📅 다음은?", "👉 이제 어떻게", "🔮 앞으로가 더 궁금"
 
-<h2>🔥 왜 핫할까?</h2>
-[IMG]
-한두 문장 (뉴스 사실 인용).
-
-<h2>💬 사람들 반응</h2>
-[IMG]
-한두 문장 (찬반·갑론을박·중립 표현).
-
-<h2>👀 앞으로는?</h2>
-[IMG]
-한두 문장.
+[H2 작성 절대 원칙]
+- **H2 텍스트에 메타 설명 괄호 절대 금지**: "(한 줄 요약)", "(뉴스 인용)", "(스코어 인용)", "(찬반)" 같은 가이드 괄호 출력 금지.
+- 위 예시는 톤 참고용. 매번 새로운 표현으로.
+- H2 4개 + 각 H2 직후 [IMG] 한 줄 + 본문 한두 문장 구조 유지.
 
 [제목 스타일]
 반드시 **"{style_label}"** 으로 작성. 예시 톤: {style_example}
