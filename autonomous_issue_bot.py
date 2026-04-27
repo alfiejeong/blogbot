@@ -146,6 +146,94 @@ def is_recent_duplicate(kw, recent_titles):
 
 
 # --- [4. 키워드 분류 (Gemini + 휴리스틱 안전망)] ---
+# 발행 가능 카테고리 화이트리스트. 그 외는 무조건 스킵.
+ALLOWED_CATEGORIES = {"restaurant", "hotspot", "entertainment", "sports"}
+
+# 분류 전 사전 차단 패턴 (정치/경제/코인/매체/IT/날씨 등)
+NONFIT_TOPIC_PATTERNS = [
+    # 코인/암호화폐
+    "비트코인", "이더리움", "리플", "도지코인", "솔라나", "코인니스",
+    "코인", "NFT", "STO", "DeFi", "거래소", "업비트", "빗썸",
+    # 주식/금융/부동산
+    "주식", "주가", "증시", "코스피", "코스닥", "환율", "금리",
+    "채권", "펀드", "ETF", "ETN", "선물", "옵션",
+    "부동산", "청약", "분양", "전세", "월세", "갭투자",
+    "재테크", "투자", "절약", "절감", "절세",
+    "부업", "투잡", "가계부", "월급",
+    # 뉴스/매체/방송 채널
+    "뉴스파이터", "뉴스공장", "뉴스데스크", "뉴스룸", "뉴스9",
+    "한국경제TV", "한국경제tv", "이데일리TV", "MTN", "SBS Biz",
+    "YTN뉴스", "JTBC뉴스", "MBN뉴스", "KBS뉴스", "MBC뉴스",
+    # 정치/사건사고
+    "국회", "청와대", "대통령실", "여당", "야당", "정부",
+    "검찰", "경찰청", "수사", "기소", "구속영장",
+    "선거", "공천", "사퇴", "탄핵",
+    # 날씨/재난
+    "날씨", "태풍", "지진", "폭우", "폭설", "폭염", "한파",
+    "미세먼지", "황사", "장마", "산불", "홍수",
+    # IT 제품/스펙
+    "갤럭시", "아이폰", "맥북", "갤럭시 S", "에어팟", "출시일",
+    "스펙", "사양", "벤치마크",
+]
+
+
+def is_nonfit_topic(kw):
+    """발행 부적합 키워드 (분류 전 즉시 스킵)"""
+    if not kw:
+        return True
+    s = kw.strip()
+    for p in NONFIT_TOPIC_PATTERNS:
+        if p in s:
+            return True
+    # 매체명/방송채널 접미사 (○○뉴스, ○○TV, ○○일보 등)
+    if re.search(r"(뉴스$|뉴스\s|TV$|tv$|일보$|신문$|방송$|미디어$|채널$)", s):
+        return True
+    return False
+
+
+# 스포츠 키워드 휴리스틱 (선수/팀/리그)
+KNOWN_SPORTS = [
+    # 축구
+    "손흥민", "김민재", "이강인", "황희찬", "황의조", "이재성",
+    "토트넘", "바르셀로나", "레알 마드리드", "맨체스터", "맨유",
+    "아스널", "리버풀", "첼시", "PSG", "유벤투스", "바이에른",
+    "리버풀", "EPL", "라리가", "분데스리가", "챔피언스리그", "UCL",
+    # 야구
+    "허수봉", "kt 위즈", "두산 베어스", "LG 트윈스", "삼성 라이온즈",
+    "KIA 타이거즈", "롯데 자이언츠", "키움 히어로즈", "SSG 랜더스",
+    "한화 이글스", "NC 다이노스", "KBO", "오타니", "이정후", "김하성",
+    # 배구
+    "전광인", "임도헌", "라경민", "박세영", "김연경", "한선수",
+    "여자배구", "남자배구", "V리그",
+    # e스포츠
+    "페이커", "쵸비", "구마유시", "케리아", "오너",
+    "LCK", "LPL", "롤드컵", "T1", "DK", "젠지",
+    # 일반
+    "월드컵", "올림픽", "아시안게임", "WBC",
+]
+SPORTS_HINTS = [
+    "선수", "감독", "프로", "리그", "구단", "결승", "예선",
+    "MVP", "WBC", "KBO", "NBA", "NFL", "EPL", "라리가",
+    "야구", "축구", "농구", "배구", "골프", "테니스", "복싱",
+    "타자", "투수", "수비수", "공격수", "골키퍼",
+    "타격", "안타", "홈런", "득점", "도루",
+    "이닝", "회말", "쿼터", "전반", "후반",
+]
+
+
+def heuristic_is_sports(kw):
+    if not kw:
+        return False
+    s = kw.strip()
+    for t in KNOWN_SPORTS:
+        if t.lower() in s.lower():
+            return True
+    if any(h in s for h in SPORTS_HINTS):
+        return True
+    return False
+
+
+
 NON_PLACE_HINTS = [
     "선수", "감독", "프로", "리그", "올림픽", "월드컵", "결승", "예선",
     "드라마", "영화", "예능", "방송", "콘서트", "팬미팅", "앨범",
@@ -247,31 +335,38 @@ def classify_keyword(kw):
     prompt = f"""한국 트렌드 키워드 "{kw}"를 분석해. 오직 아래 JSON만. 코드블록 금지.
 
 {{
-  "category": "restaurant 또는 hotspot 또는 entertainment 또는 general 중 하나",
+  "category": "restaurant 또는 hotspot 또는 entertainment 또는 sports 또는 SKIP",
   "region": "강남구/성수동/잠실 같은 지역명, 장소 아니면 null",
   "image_queries": ["영어 이미지 검색어 4개"],
   "is_person": true 또는 false,
   "is_brand_or_show": true 또는 false
 }}
 
-[엄격한 분류 규칙]
+[엄격한 분류 규칙 — 4개 카테고리만 발행, 나머지는 SKIP]
 - restaurant: 식당/카페/베이커리/디저트 - 먹는 곳 자체
-- hotspot: 사람 모이는 물리적 장소 (쇼핑몰/팝업/명소/야구장/공원)
-- entertainment: 연예인/예능 프로그램/드라마/연애 프로그램/OTT 콘텐츠
-  → 이 분류면 절대 'restaurant/hotspot' 아님. 프로그램 제목에 지역명이 들어가도 entertainment.
-- general: 위 셋 아닌 것 (스포츠 선수·경기/뉴스/사건사고/상품 출시/정치/경제)
+- hotspot: 사람 모이는 물리적 장소 (쇼핑몰/팝업/명소/공원)
+- entertainment: 연예인/예능 프로그램/드라마/연애 프로그램/OTT/가수/배우/아이돌/유튜버
+  → 프로그램 제목에 지역명이 들어가도 entertainment.
+- sports: 스포츠 선수/팀/리그/경기 결과 (야구/축구/배구/농구/e스포츠 등)
+- SKIP: 위 4개 어디에도 안 들어가면 모두 SKIP
+  → 정치/경제/주식/코인/부동산/뉴스 매체명/방송채널/IT 제품/날씨/사건사고는 전부 SKIP
 
 [중요 예시]
 - "구기동 프렌즈" → entertainment (예능 프로그램, '구기동'이 들어가도 절대 동네 아님)
-- "나는솔로", "솔로지옥", "환승연애" → entertainment (연애 예능)
-- "오징어게임 시즌3" → entertainment (드라마)
-- "크리스 존슨" → entertainment 또는 general (출연자라면 entertainment)
-- "유재석", "김종국" → entertainment (예능인)
-- "페이커" → general (e스포츠 선수)
-- "허수봉" → general (배구 선수)
+- "나는솔로", "솔로지옥", "환승연애" → entertainment
+- "오징어게임 시즌3" → entertainment
+- "크리스 존슨", "유재석", "김종국" → entertainment
 - "방탄소년단", "뉴진스" → entertainment
+- "허수봉" → sports (배구 선수)
+- "페이커" → sports (e스포츠 선수)
+- "kt 위즈", "두산 베어스" → sports
+- "아스널 FC", "토트넘" → sports
 - "성수동 베이글" → restaurant, region="성수동"
 - "잠실 야구장" → hotspot, region="잠실"
+- "비트코인", "코인니스" → SKIP
+- "한국경제tv", "뉴스파이터" → SKIP
+- "갤럭시 S25" → SKIP
+- "절약", "재테크" → SKIP
 
 [image_queries]
 - 반드시 영어. 한국어/한국 지명 금지.
@@ -287,42 +382,41 @@ def classify_keyword(kw):
     except Exception as e:
         log(f"⚠️ Gemini 분류 실패, fallback: {e}")
         data = {
-            "category": "general", "region": None,
+            "category": "SKIP", "region": None,
             "image_queries": [kw, "korea trend", "city lifestyle", "modern life"],
             "is_person": False, "is_brand_or_show": False,
         }
 
-    data.setdefault("category", "general")
+    data.setdefault("category", "SKIP")
     data.setdefault("region", None)
     data.setdefault("image_queries", [kw])
     data.setdefault("is_person", False)
     data.setdefault("is_brand_or_show", False)
 
-    # 0) 예능/드라마 제목이면 무조건 entertainment (장소 분류 차단)
-    if heuristic_is_entertainment(kw):
+    # 0) 휴리스틱 우선순위: 스포츠 > 예능 > 장소
+    if heuristic_is_sports(kw):
+        if data["category"] != "sports":
+            log(f"   🛡️ 휴리스틱: {kw} 는 스포츠 → sports 강제")
+        data["category"] = "sports"
+        data["region"] = None
+    elif heuristic_is_entertainment(kw):
         if data["category"] != "entertainment":
             log(f"   🛡️ 휴리스틱: {kw} 는 예능/드라마 → entertainment 강제")
         data["category"] = "entertainment"
         data["region"] = None
     else:
         h = heuristic_is_place(kw)
-        if h is False:
-            if data["category"] in ("restaurant", "hotspot"):
-                log(f"   🛡️ 휴리스틱: {kw} 는 장소 아님 → general 강제")
-                data["category"] = "general"
-                data["region"] = None
-        elif h is True and data["category"] == "general":
+        if h is False and data["category"] in ("restaurant", "hotspot"):
+            log(f"   🛡️ 휴리스틱: {kw} 는 장소 아님 → SKIP")
+            data["category"] = "SKIP"
+            data["region"] = None
+        elif h is True and data["category"] not in ("restaurant", "hotspot"):
             log(f"   🛡️ 휴리스틱: {kw} 는 장소 신호 → hotspot 보정")
             data["category"] = "hotspot"
 
-    # entertainment는 인물이어도 그대로 유지
-    if data["category"] == "entertainment":
-        return data
-
-    if data.get("is_person") or data.get("is_brand_or_show"):
-        if data["category"] != "general":
-            log(f"   🛡️ is_person/is_brand → general 강제")
-        data["category"] = "general"
+    # 화이트리스트 게이트: 4개 카테고리만 통과
+    if data["category"] not in ALLOWED_CATEGORIES:
+        data["category"] = "SKIP"
         data["region"] = None
 
     return data
@@ -1082,6 +1176,21 @@ TITLE_STYLES_PLACE = [
     ("비교 톤", '"{kw} vs 평소 가던 곳, 결론은"'),
 ]
 
+TITLE_STYLES_SPORTS = [
+    ("승부 톤", '"{kw}, 어제 그 경기 진짜 미쳤다"'),
+    ("기록 톤", '"{kw}, 이번 시즌 이 기록 봤어?"'),
+    ("폼 좋음 톤", '"요즘 {kw} 폼이 미쳤다는 이유"'),
+    ("팬 시점", '"{kw} 보면서 들었던 솔직한 생각"'),
+    ("순위 톤", '"{kw}, 지금 순위가 이렇게 됐다"'),
+    ("선수 화제", '"{kw}, 어제 그 선수 진짜 한 건 했네"'),
+    ("부진 톤", '"{kw}, 요즘 안 풀리는 이유"'),
+    ("드라마 톤", '"{kw}, 끝까지 봐야 했던 이유"'),
+    ("매치업 톤", '"{kw} 다음 경기 관전 포인트"'),
+    ("부상/이적 톤", '"{kw}, 갑자기 이 소식 떴다"'),
+    ("MVP 톤", '"{kw}, 이번엔 진짜 MVP감"'),
+    ("팬덤 톤", '"{kw} 팬이라면 이 장면은 못 잊지"'),
+]
+
 TITLE_STYLES_ENTERTAINMENT = [
     ("회차 리액션", '"{kw}, 어제 그 장면 보고 진짜 깜짝"'),
     ("스포 주의 톤", '"{kw} 이번 주 흐름 정리 (스포 살짝)"'),
@@ -1106,6 +1215,8 @@ def generate_post(kw, info, news_ctx=""):
         style_label, style_example = random.choice(TITLE_STYLES_PLACE)
     elif cat == "entertainment":
         style_label, style_example = random.choice(TITLE_STYLES_ENTERTAINMENT)
+    elif cat == "sports":
+        style_label, style_example = random.choice(TITLE_STYLES_SPORTS)
     else:
         style_label, style_example = random.choice(TITLE_STYLES_GENERAL)
 
@@ -1127,7 +1238,58 @@ def generate_post(kw, info, news_ctx=""):
     else:
         ctx_block = ""
 
-    if cat == "entertainment":
+    if cat == "sports":
+        prompt = f"""너는 한국의 스포츠 가이드 블로거야. 키워드 "{kw}"로 모바일 최적화 글을 써줘.
+{ctx_block}
+[목표]
+- 야구/축구/배구/농구/e스포츠 등의 선수·팀·경기 화제 글.
+- "다녀온 후기" 톤 절대 금지. 시청·관전·결과·선수 폼 위주.
+- 위 뉴스 컨텍스트의 구체 기록(전적·순위·득점·타율·세트스코어·MVP 등)을 직접 인용.
+
+[필수 콘텐츠 — 뉴스 컨텍스트 안에서만]
+1) 어떤 선수/팀/경기 얘기인지 한 줄
+2) 최근 어떤 결과/플레이가 화제인지 (스코어·기록 포함)
+3) 핵심 장면이나 선수 폼 (뉴스 인용)
+4) 다음 경기/시즌 관전 포인트
+
+[톤 & 분량]
+- 친구 카톡 가벼운 관전 톤: "어제 그 경기 봤어?", "솔직히 ~한 듯", "다음 경기는~".
+- 한 문단 1~2문장. 줄바꿈 자주.
+- 본문 전체 400~600자.
+- 이모지는 H2 헤딩에만 1개씩.
+- 단정적 평가·사생활·루머 금지. 확정 안 된 건 '~로 알려졌다'.
+
+[구조 - 정확히]
+H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
+<h2>⚾/⚽/🏐 도입 (어떤 선수/팀의 어떤 경기·소식)</h2>
+[IMG]
+한두 문장.
+
+<h2>🔥 결과·기록 핵심 (뉴스 숫자 인용)</h2>
+[IMG]
+한두 문장.
+
+<h2>👀 핵심 장면 / 폼 분석</h2>
+[IMG]
+한두 문장.
+
+<h2>📅 다음 경기 / 관전 포인트</h2>
+[IMG]
+한두 문장.
+
+[제목 스타일]
+반드시 **"{style_label}"** 으로 작성. 예시 톤: {style_example}
+- 베끼지 말고 톤만 가져와서 새로.
+- "정리해 봤어요", "한 번에 정리" 같은 흔한 표현 금지.
+- 제목에 "주차" 단어 금지.
+
+[출력 형식 - 오직 JSON만]
+{{
+  "title": "글 제목 (40자 이내)",
+  "content_html": "<h2>...</h2>[IMG]... HTML"
+}}"""
+
+    elif cat == "entertainment":
         person_warn = (
             "실존 인물·연예인 관련 글: 단정 평가, 사생활 추측, 외모 평가 금지. "
             "공식 발표·뉴스 인용·시청자 반응만. 확정 안 된 건 '~라고 알려졌다' 톤."
@@ -1577,7 +1739,12 @@ def run_bot():
 
         log(f"\n🔥 [{kw}] 처리 시작")
         try:
-            # ⓪ 추상 키워드 차단 (자영업/절감/재테크/맛집 등 단독)
+            # ⓪-A 부적합 토픽 차단 (코인/주식/매체명/정치/IT/날씨 등 - 분류 전 즉시 스킵)
+            if is_nonfit_topic(kw):
+                log(f"   ⏭️  부적합 토픽 (코인/매체/정치/IT/날씨 등) → 스킵")
+                continue
+
+            # ⓪-B 추상 키워드 차단 (자영업/절감/재테크 등 단독)
             if is_too_abstract(kw):
                 log(f"   ⏭️  추상 키워드 → 콘텐츠로 다루기 부적절, 스킵")
                 continue
@@ -1592,6 +1759,11 @@ def run_bot():
             log(f"   → 분류: category={info['category']} region={info.get('region')} "
                 f"is_person={info.get('is_person')} is_brand={info.get('is_brand_or_show')}")
 
+            # ②-B 카테고리 화이트리스트 게이트 (restaurant/hotspot/entertainment/sports만 발행)
+            if info["category"] not in ALLOWED_CATEGORIES:
+                log(f"   ⏭️  허용 카테고리 아님 ({info['category']}) → 스킵")
+                continue
+
             # ③ 이슈 컨텍스트 수집 (네이버 뉴스) — 글의 사실 근거
             news_items = fetch_naver_news_items(kw, display=10)
             news_ctx = build_news_context(news_items)
@@ -1600,7 +1772,8 @@ def run_bot():
             # 인물 키워드는 사실 기반이 더 중요 → 더 빡센 임계값
             is_person = bool(info.get("is_person"))
             min_ctx = 350 if is_person else 200
-            if info["category"] in ("general", "entertainment") and len(news_ctx) < min_ctx:
+            # entertainment/sports는 모두 사실 기반 글이라 컨텍스트 필수
+            if info["category"] in ("entertainment", "sports") and len(news_ctx) < min_ctx:
                 log(f"   ⏭️  뉴스 컨텍스트 {len(news_ctx)}자 < {min_ctx} (인물여부={is_person}) → 스킵")
                 continue
 
