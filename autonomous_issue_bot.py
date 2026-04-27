@@ -47,6 +47,35 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 auth = HTTPBasicAuth(WP_USER, WP_APP_PW)
 
 
+# --- [Gemini 재시도 래퍼] ---
+def gemini_generate(contents, max_retries=3, label=""):
+    """
+    503/429/500/502/504 같은 일시적 에러에 지수 백오프로 재시도.
+    실패 시 마지막 예외 그대로 raise.
+    """
+    delays = [2, 5, 12]  # seconds
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return client.models.generate_content(model=MODEL_ID, contents=contents)
+        except Exception as e:
+            last_err = e
+            err_str = str(e)
+            retryable = any(
+                code in err_str
+                for code in ["503", "UNAVAILABLE", "429", "500", "502", "504",
+                             "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL"]
+            )
+            if not retryable or attempt == max_retries - 1:
+                raise
+            wait = delays[min(attempt, len(delays) - 1)]
+            log(f"   ⏳ Gemini {label} 일시 오류 → {wait}초 후 재시도 "
+                f"({attempt + 1}/{max_retries}): {err_str[:90]}")
+            time.sleep(wait)
+    if last_err:
+        raise last_err
+
+
 # --- [2. 트렌드 수집] ---
 def get_google_trends():
     log("🌐 구글 트렌드 RSS 수집 중...")
@@ -248,7 +277,7 @@ def classify_keyword(kw):
 - 반드시 영어. 한국어/한국 지명 금지.
 - 인물이면 외형 묘사 금지, 대신 배경/맥락 (예: "esports tournament stage")"""
     try:
-        res = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        res = gemini_generate(prompt, label="classify")
         txt = res.text.strip()
         txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
         m = re.search(r"\{.*\}", txt, re.DOTALL)
@@ -667,6 +696,20 @@ def is_meta_or_ad_image(src, caption):
     return False
 
 
+def caption_matches_keyword(caption, kw):
+    """
+    캡션 텍스트에 키워드(또는 토큰) 중 하나라도 포함되는지.
+    인물 키워드에서 '제3자 사진' 차단용. 한글 이름은 정확 매칭.
+    """
+    if not caption or not kw:
+        return False
+    if kw in caption:
+        return True
+    tokens = [t for t in re.split(r"\s+", kw.strip())
+              if len(t) >= 2 and t not in {"의", "그", "이", "저", "것", "수"}]
+    return any(t in caption for t in tokens)
+
+
 def parse_press_article(url):
     """기사 HTML → (img_url, caption) 후보 리스트. 본문 컨테이너 한정."""
     try:
@@ -806,11 +849,11 @@ def rehost_image_to_wp(image_url, referer=None):
     return None, None
 
 
-def collect_korean_press_images(items, kw, target=3):
+def collect_korean_press_images(items, kw, target=3, require_keyword_match=False):
     """
     0순위 이미지 소스: 국내 언론사 (저작권 안전 캡션만).
     items: fetch_naver_news_items() 결과 (재사용해서 API 절약).
-    캡션 위험 패턴 / 메타·광고 URL·캡션 / 다운로드 실패 모두 차단.
+    require_keyword_match: 인물 키워드일 때 True. 캡션에 키워드 없으면 거부 (제3자 사진 차단).
     """
     if not items:
         return []
@@ -821,12 +864,13 @@ def collect_korean_press_images(items, kw, target=3):
         return []
 
     art_urls = [it["url"] for it in items]
-    log(f"   📰 네이버 뉴스 후보 {len(art_urls)}건 (이미지 수집)")
+    log(f"   📰 네이버 뉴스 후보 {len(art_urls)}건 (이미지 수집, 키워드매칭={require_keyword_match})")
     out = []
     seen_src = set()
     rejected_meta_ad = 0
     rejected_unsafe = 0
     rejected_no_caption = 0
+    rejected_no_kw_match = 0
     for art_url in art_urls:
         if len(out) >= target:
             break
@@ -839,7 +883,7 @@ def collect_korean_press_images(items, kw, target=3):
             if img_src in seen_src:
                 continue
             seen_src.add(img_src)
-            # 1차: 메타/광고 차단 (URL/캡션 블랙리스트)
+            # 1차: 메타/광고 차단
             if is_meta_or_ad_image(img_src, caption):
                 rejected_meta_ad += 1
                 continue
@@ -849,6 +893,10 @@ def collect_korean_press_images(items, kw, target=3):
                 continue
             if not is_press_image_safe(caption):
                 rejected_unsafe += 1
+                continue
+            # 3차: 인물 키워드면 캡션에 본인 이름이 있어야 채택
+            if require_keyword_match and not caption_matches_keyword(caption, kw):
+                rejected_no_kw_match += 1
                 continue
             wp_id, wp_url = rehost_image_to_wp(img_src, referer=art_url)
             if not wp_url:
@@ -866,11 +914,13 @@ def collect_korean_press_images(items, kw, target=3):
                 break
         time.sleep(0.4)
     log(f"   📰 언론 결과: 채택 {len(out)} / 메타·광고차단 {rejected_meta_ad} / "
-        f"위험출처 {rejected_unsafe} / 캡션없음 {rejected_no_caption}")
+        f"위험출처 {rejected_unsafe} / 캡션없음 {rejected_no_caption} / "
+        f"키워드불일치 {rejected_no_kw_match}")
     return out
 
 
-def collect_images(queries, kw, category, target=5, news_items=None):
+def collect_images(queries, kw, category, target=5, news_items=None,
+                   is_person=False):
     """0순위: 국내 언론(안전 캡션) → 5단 폴백(Unsplash·Pexels·위키·Picsum)"""
     pool, seen = [], set()
 
@@ -884,8 +934,12 @@ def collect_images(queries, kw, category, target=5, news_items=None):
             pool.append(img)
 
     # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
+    # 인물 키워드면 캡션에 본인 이름 포함된 사진만 채택 (제3자 차단)
     if news_items:
-        add(collect_korean_press_images(news_items, kw, target=target))
+        add(collect_korean_press_images(
+            news_items, kw, target=target,
+            require_keyword_match=is_person,
+        ))
     log(f"   [tier0 국내언론] {len(pool)}장")
 
     # Tier 1: API 키 + 구체 쿼리
@@ -1175,17 +1229,23 @@ H2 헤딩 4개. 각 H2 직후에 정확히 [IMG] 한 줄.
 }}"""
 
     else:
-        person_warn = (
-            "키워드가 실존 인물이면 단정 평가, 사생활 추측, 외모 평가 절대 금지. "
-            "공식 발표·확인된 사실만, 나머지는 '~라고 알려져 있어요' 식으로."
-            if info.get("is_person") else ""
-        )
+        is_person = bool(info.get("is_person"))
+        person_warn = ""
+        if is_person:
+            person_warn = (
+                "**중요: 이 키워드는 사람 이름이다. "
+                "절대 상품·필수템·아이템·제품·브랜드로 풀지 마라. "
+                "외모 평가·사생활 추측·단정 평가 금지. "
+                "공식 발표·뉴스 인용된 사실만 사용. "
+                "확정 안 된 건 '~라고 알려졌다'/'~라고 한다' 식으로.**"
+            )
         prompt = f"""너는 한국의 트렌드 정보 블로거야. 키워드 "{kw}"로 모바일 최적화 블로그 글을 써줘.
 {ctx_block}
 [목표]
 - 사람들이 "이게 왜 핫하지?" 검색 → 클릭 → 만족하고 가는 정보성 글.
 - 검색 유입 + 체류 시간 목적. 광고/홍보 단어 금지.
 - **이 키워드는 장소가 아니야. "주차", "주차장", "주차 팁" 같은 단어 절대 본문에 쓰지 말 것.**
+- **키워드 정체 확인 필수: 위 뉴스 컨텍스트를 보고 사람/제품/사건 중 무엇인지 판단. 헷갈리면 가장 많이 등장한 맥락 따라가기.**
 
 [필수 콘텐츠 — 위 뉴스 발췌만 근거로]
 1) 이게 무엇/누구인지 한 줄 (뉴스 맥락 그대로)
@@ -1234,7 +1294,7 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 }}"""
 
     try:
-        res = client.models.generate_content(model=MODEL_ID, contents=prompt)
+        res = gemini_generate(prompt, label="post")
         txt = res.text.strip()
         txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
         m = re.search(r"\{.*\}", txt, re.DOTALL)
@@ -1246,17 +1306,10 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         if not title or not content:
             raise ValueError("title/content 비어있음")
     except Exception as e:
-        log(f"⚠️ 본문 생성 실패, fallback: {e}")
-        try:
-            r2 = client.models.generate_content(
-                model=MODEL_ID,
-                contents=f'키워드 "{kw}"에 대해 H2 4개 + [IMG] 토큰 형식 짧은 글(400자). 코드블록 금지.',
-            )
-            content = r2.text.strip()
-        except Exception:
-            content = f"<h2>📌 {kw}</h2>[IMG]<p>요즘 화제인 키워드 {kw}.</p>"
-        # 폴백 제목도 스타일 풀에서
-        title = style_example.strip('"').format(kw=kw)
+        # 재시도까지 다 실패한 503/할당량 → 헛소리 fallback 만들지 말고 스킵
+        log(f"⚠️ 본문 생성 최종 실패 (재시도 포함): {str(e)[:120]}")
+        log("   → fallback으로 헛글 만드느니 발행 스킵")
+        return None, None
 
     # 일반/엔터 글 제목에 "주차" 누락 방지
     if cat in ("general", "entertainment"):
@@ -1544,16 +1597,19 @@ def run_bot():
             news_ctx = build_news_context(news_items)
             log(f"   → 뉴스 컨텍스트: {len(news_items)}건 / {len(news_ctx)}자")
 
-            # general/entertainment는 뉴스 컨텍스트가 빈약하면 발행 스킵 (낚시 글 방지)
-            if info["category"] in ("general", "entertainment") and len(news_ctx) < 200:
-                log("   ⏭️  뉴스 컨텍스트 부족 → 사실 기반 작성 불가, 스킵")
+            # 인물 키워드는 사실 기반이 더 중요 → 더 빡센 임계값
+            is_person = bool(info.get("is_person"))
+            min_ctx = 350 if is_person else 200
+            if info["category"] in ("general", "entertainment") and len(news_ctx) < min_ctx:
+                log(f"   ⏭️  뉴스 컨텍스트 {len(news_ctx)}자 < {min_ctx} (인물여부={is_person}) → 스킵")
                 continue
 
-            # ④ 이미지 수집 (Tier 0: news_items 재사용, 메타·광고·매체촬영 차단)
+            # ④ 이미지 수집 (Tier 0: news_items 재사용, 메타·광고·매체촬영·제3자 사진 차단)
             queries = info.get("image_queries") or [kw]
             images = collect_images(
                 queries, kw=kw, category=info["category"],
                 target=TOTAL_IMAGES, news_items=news_items,
+                is_person=is_person,
             )
             log(f"   → 이미지 총 {len(images)}장 확보 (목표 {TOTAL_IMAGES}장)")
 
