@@ -43,6 +43,11 @@ TOTAL_IMAGES = 3
 # False: 테마가 featured 자동 표시 안 할 때만 → 본문 상단에 hero 직접 삽입
 THEME_AUTO_FEATURED_IMAGE = True
 
+# 검토 큐 모드: True면 WP에 status="draft"로 저장 (자동 발행 X).
+# 사용자분이 모바일 워드프레스 앱에서 검토 후 발행 버튼 누르는 형태.
+# GitHub Actions 환경변수 PUBLISH_AS_DRAFT=1로 켜면 활성.
+PUBLISH_AS_DRAFT = os.environ.get("PUBLISH_AS_DRAFT", "").strip() in {"1", "true", "True", "yes"}
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 auth = HTTPBasicAuth(WP_USER, WP_APP_PW)
 
@@ -382,6 +387,87 @@ PLACE_HINTS = [
     "역", "동", "구", "거리", "타운", "백화점", "쇼핑몰", "공원", "야구장",
 ]
 
+# hotspot/restaurant 통과 조건: 키워드에 명시적 지역 신호가 있어야 함
+# 단독 브랜드명("다이소", "올리브영", "스타벅스 신메뉴")이 hotspot으로 잡혀
+# 주차 정보 붙는 사고를 원천 차단.
+KOREAN_REGIONS = [
+    # 서울 자치구
+    "강남구", "강동구", "강북구", "강서구", "관악구", "광진구", "구로구", "금천구",
+    "노원구", "도봉구", "동대문구", "동작구", "마포구", "서대문구", "서초구", "성동구",
+    "성북구", "송파구", "양천구", "영등포구", "용산구", "은평구", "종로구", "중구", "중랑구",
+    # 동/지역 (조사 없는 형태)
+    "강남", "강동", "강북", "강서", "관악", "광진", "구로", "금천",
+    "노원", "도봉", "동대문", "동작", "마포", "서대문", "서초", "성동",
+    "성북", "송파", "양천", "영등포", "용산", "은평", "종로", "중랑",
+    # 핫플 동네
+    "성수", "성수동", "익선", "익선동", "연남", "연남동", "망원", "망원동",
+    "합정", "홍대", "신촌", "이태원", "한남", "한남동", "압구정", "청담",
+    "가로수길", "신사", "신사동", "삼성동", "역삼동", "논현", "논현동",
+    "잠실", "잠원", "방이동", "송리단길", "석촌호수",
+    "여의도", "광화문", "시청", "명동", "충무로", "을지로", "동대문",
+    "한강진", "독립문", "서촌", "북촌", "삼청동", "대학로",
+    "건대", "건대입구", "왕십리", "성수카페거리",
+    # 경기/인천 핫플
+    "분당", "판교", "정자동", "야탑", "수내", "광교", "동탄", "일산",
+    "송도", "청라",
+    # 광역시 (단독 통과)
+    "부산", "대구", "인천", "광주", "대전", "울산", "세종",
+    "해운대", "광안리", "서면", "남포동", "전포",
+    "경리단", "공덕", "구의", "수유",
+]
+# 지역 접미사 패턴 (○○역, ○○동, ○○구, ○○로, ○○길, ○○시장)
+REGION_SUFFIX_PATTERN = re.compile(
+    r"[가-힣]{2,}(역|동|구|로|길|거리|시장|단길|상가)"
+)
+
+
+def has_explicit_region(kw):
+    """
+    키워드에 명시적 지역 신호가 있는지. 없으면 hotspot/restaurant 통과 X.
+    토큰 단위 정확/접두 매칭만 — '무신사'에 '신사'가 들어있다고 통과되면 안 됨.
+    """
+    if not kw:
+        return False
+    s = kw.strip()
+    tokens = re.findall(r"[가-힣A-Za-z0-9]+", s)
+    for tok in tokens:
+        for r in KOREAN_REGIONS:
+            # 토큰이 region과 정확 매칭하거나 region으로 시작할 때만 (강남역/성수동카페)
+            if tok == r or tok.startswith(r):
+                return True
+    # 지역 접미사 패턴 (○○역, ○○동, ○○로, ○○길, ○○시장 등)
+    for tok in tokens:
+        if REGION_SUFFIX_PATTERN.fullmatch(tok) and len(tok) >= 3:
+            return True
+    return False
+
+
+# 단독으로 발행하면 안 되는 전국 체인 브랜드 (hotspot 오분류 대표 케이스)
+NATIONWIDE_CHAIN_BRANDS = [
+    "다이소", "올리브영", "이마트", "홈플러스", "롯데마트", "코스트코",
+    "스타벅스", "투썸플레이스", "이디야", "메가커피", "컴포즈커피",
+    "맥도날드", "버거킹", "롯데리아", "맘스터치", "kfc",
+    "교촌", "BBQ", "BHC", "푸라닭",
+    "무신사", "29CM", "에이블리", "지그재그",
+    "쿠팡", "마켓컬리", "네이버", "카카오",
+    "유니클로", "ZARA", "H&M",
+    "다이소", "아성다이소",
+]
+
+
+def is_nationwide_brand_alone(kw):
+    """단독 브랜드명(지역명 없이)인지. True면 hotspot/restaurant 부적합."""
+    if not kw:
+        return False
+    s = kw.strip().lower()
+    for b in NATIONWIDE_CHAIN_BRANDS:
+        if b.lower() in s:
+            # 브랜드 + 지역명 조합이면 OK ('성수동 다이소' 같은 거)
+            if has_explicit_region(s):
+                return False
+            return True
+    return False
+
 
 def is_too_abstract(kw):
     """추상 키워드면 True (발행 스킵)"""
@@ -513,6 +599,18 @@ def classify_keyword(kw):
     if data["category"] not in ALLOWED_CATEGORIES:
         data["category"] = "SKIP"
         data["region"] = None
+
+    # hotspot/restaurant은 키워드에 명시적 지역명이 있어야만 통과.
+    # "다이소", "올리브영" 같은 전국 체인 단독 브랜드가 주차 정보 붙는 사고 차단.
+    if data["category"] in ("hotspot", "restaurant"):
+        if is_nationwide_brand_alone(kw):
+            log(f"   🛡️ 단독 브랜드({kw}) → hotspot 부적합, SKIP")
+            data["category"] = "SKIP"
+            data["region"] = None
+        elif not has_explicit_region(kw):
+            log(f"   🛡️ 지역명 없음({kw}) → hotspot/restaurant 부적합, SKIP")
+            data["category"] = "SKIP"
+            data["region"] = None
 
     return data
 
@@ -1811,7 +1909,8 @@ def upload_featured_image(img):
 
 
 def post_to_wordpress(title, content, featured_id=None):
-    payload = {"title": title, "content": content, "status": "publish"}
+    status = "draft" if PUBLISH_AS_DRAFT else "publish"
+    payload = {"title": title, "content": content, "status": status}
     if featured_id:
         payload["featured_media"] = featured_id
     return requests.post(f"{WP_BASE}/posts", auth=auth, json=payload, timeout=40)
@@ -1819,7 +1918,8 @@ def post_to_wordpress(title, content, featured_id=None):
 
 # --- [10. 메인 파이프라인] ---
 def run_bot():
-    log("🚀 자동 발행 봇 시작")
+    mode = "검토 큐 (draft)" if PUBLISH_AS_DRAFT else "자동 발행 (publish)"
+    log(f"🚀 자동 발행 봇 시작 — 모드: {mode}")
 
     # ── API 키 사전 점검 (자주 빠뜨리는 부분)
     if not GEMINI_API_KEY:
@@ -1881,8 +1981,14 @@ def run_bot():
             if info["category"] not in ALLOWED_CATEGORIES:
                 cat_from_news = classify_by_news_context(news_items, kw)
                 if cat_from_news in ALLOWED_CATEGORIES:
-                    log(f"   🛡️ 뉴스기반 보정: SKIP → {cat_from_news}")
-                    info["category"] = cat_from_news
+                    # hotspot/restaurant 보정은 지역명 검증 통과 시에만
+                    if cat_from_news in ("hotspot", "restaurant"):
+                        if is_nationwide_brand_alone(kw) or not has_explicit_region(kw):
+                            log(f"   🛡️ 뉴스기반은 {cat_from_news}였지만 지역명 없음 → SKIP 유지")
+                            cat_from_news = None
+                    if cat_from_news in ALLOWED_CATEGORIES:
+                        log(f"   🛡️ 뉴스기반 보정: SKIP → {cat_from_news}")
+                        info["category"] = cat_from_news
 
             # ②-C 화이트리스트 게이트 (restaurant/hotspot/entertainment/sports만 발행)
             if info["category"] not in ALLOWED_CATEGORIES:
@@ -1946,7 +2052,8 @@ def run_bot():
             featured_id = upload_featured_image(images[0])
             r = post_to_wordpress(title, full_html, featured_id=featured_id)
             if r.status_code in (200, 201):
-                log(f"🎉 [{kw}] 발행 완료 (id={r.json().get('id')})")
+                state = "draft 저장" if PUBLISH_AS_DRAFT else "발행 완료"
+                log(f"🎉 [{kw}] {state} (id={r.json().get('id')})")
                 posted_count += 1
                 # within-run 중복 차단: 같은 회차 안에서 비슷한 키워드가 또 들어오면 스킵
                 recent_titles.insert(0, title)
