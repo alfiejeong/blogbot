@@ -131,6 +131,39 @@ KNOWN_PERSON_OR_BRAND = [
     "손흥민", "김민재", "이강인",
     "김원훈",  # 코미디언/배우 등
 ]
+# 예능·연애 프로그램·드라마 제목들 — 핫플로 오인분류되는 거 방지
+KNOWN_ENTERTAINMENT = [
+    "나는솔로", "나는 솔로", "나솔", "솔로지옥", "환승연애", "하트시그널",
+    "돌싱글즈", "체인지데이즈", "러브캐쳐", "더글로리", "스우파",
+    "런닝맨", "1박2일", "무한도전", "유퀴즈", "유 퀴즈",
+    "라디오스타", "놀면뭐하니", "놀면 뭐하니", "구기동 프렌즈",
+    "신서유기", "삼시세끼", "골때녀", "골 때리는",
+    "꽃보다", "지구마불", "지락이의 상하이", "여고추리반",
+    "뿅뿅 지구오락실", "지구오락실", "어쩌다 사장", "전지적 참견",
+    "독박투어", "손현주의 간이역",
+    # 드라마
+    "오징어게임", "오징어 게임", "지옥에서 온 판사", "내남편과 결혼해줘",
+    "정년이", "굿파트너", "지옥",
+]
+ENTERTAINMENT_HINTS = [
+    "예능", "드라마", "방송", "출연진", "출연자", "방영", "회차",
+    "1회", "2회", "3회", "4회", "5회", "최종회",
+    "OTT", "넷플릭스", "티빙", "쿠팡플레이", "디즈니",
+    "데뷔", "컴백", "복귀", "신곡",
+    "솔로", "지옥", "MC", "패널",
+]
+# 너무 포괄적/추상적이라 콘텐츠 만들기 애매한 키워드 — 발행 스킵
+ABSTRACT_KEYWORD_BLACKLIST = {
+    "자영업", "절약", "절감", "재테크", "부업", "투잡",
+    "건강", "다이어트", "운동", "헬스", "취미",
+    "공부", "취업", "이직", "퇴사", "결혼", "출산", "육아", "교육",
+    "여행", "쇼핑", "패션", "뷰티", "가족",
+    "맛집", "핫플", "카페", "디저트", "회식",
+    "주식", "코인", "투자", "부동산",
+    "날씨", "일교차", "장마", "황사", "미세먼지",
+    "주말", "휴가", "월급", "퇴근",
+    "추천", "꿀팁", "리뷰", "후기",
+}
 PLACE_HINTS = [
     "맛집", "카페", "디저트", "파스타", "초밥", "라멘", "베이커리",
     "핫플", "팝업", "성수", "강남", "잠실", "홍대", "압구정", "이태원",
@@ -138,8 +171,37 @@ PLACE_HINTS = [
 ]
 
 
+def is_too_abstract(kw):
+    """추상 키워드면 True (발행 스킵)"""
+    if not kw:
+        return True
+    s = kw.strip()
+    # 단일 단어이면서 블랙리스트면 차단
+    tokens = re.split(r"\s+", s)
+    if len(tokens) == 1 and s in ABSTRACT_KEYWORD_BLACKLIST:
+        return True
+    # 두 단어인데 둘 다 추상이면 차단 (예: '맛집 추천', '자영업 절세')
+    if len(tokens) == 2 and all(t in ABSTRACT_KEYWORD_BLACKLIST for t in tokens):
+        return True
+    return False
+
+
+def heuristic_is_entertainment(kw):
+    s = kw.strip()
+    for t in KNOWN_ENTERTAINMENT:
+        if t in s:
+            return True
+    hits = sum(1 for h in ENTERTAINMENT_HINTS if h in s)
+    if hits >= 1 and any(h in s for h in ["예능", "드라마", "방송", "출연", "회차", "OTT"]):
+        return True
+    return False
+
+
 def heuristic_is_place(kw):
     s = kw.strip()
+    # 예능/드라마 제목이면 무조건 장소 아님
+    if heuristic_is_entertainment(s):
+        return False
     for tok in KNOWN_PERSON_OR_BRAND:
         if tok in s:
             return False
@@ -156,7 +218,7 @@ def classify_keyword(kw):
     prompt = f"""한국 트렌드 키워드 "{kw}"를 분석해. 오직 아래 JSON만. 코드블록 금지.
 
 {{
-  "category": "restaurant 또는 hotspot 또는 general 중 하나",
+  "category": "restaurant 또는 hotspot 또는 entertainment 또는 general 중 하나",
   "region": "강남구/성수동/잠실 같은 지역명, 장소 아니면 null",
   "image_queries": ["영어 이미지 검색어 4개"],
   "is_person": true 또는 false,
@@ -166,14 +228,19 @@ def classify_keyword(kw):
 [엄격한 분류 규칙]
 - restaurant: 식당/카페/베이커리/디저트 - 먹는 곳 자체
 - hotspot: 사람 모이는 물리적 장소 (쇼핑몰/팝업/명소/야구장/공원)
-- general: 위 둘 아닌 모든 것 (인물/방송/게임/뉴스/스포츠 경기/상품 출시/사건사고)
+- entertainment: 연예인/예능 프로그램/드라마/연애 프로그램/OTT 콘텐츠
+  → 이 분류면 절대 'restaurant/hotspot' 아님. 프로그램 제목에 지역명이 들어가도 entertainment.
+- general: 위 셋 아닌 것 (스포츠 선수·경기/뉴스/사건사고/상품 출시/정치/경제)
 
 [중요 예시]
+- "구기동 프렌즈" → entertainment (예능 프로그램, '구기동'이 들어가도 절대 동네 아님)
+- "나는솔로", "솔로지옥", "환승연애" → entertainment (연애 예능)
+- "오징어게임 시즌3" → entertainment (드라마)
+- "크리스 존슨" → entertainment 또는 general (출연자라면 entertainment)
+- "유재석", "김종국" → entertainment (예능인)
 - "페이커" → general (e스포츠 선수)
-- "김원훈" → general (인물)
-- "방탄소년단" → general
-- "갤럭시 S25" → general
-- "오징어게임 시즌3" → general
+- "허수봉" → general (배구 선수)
+- "방탄소년단", "뉴진스" → entertainment
 - "성수동 베이글" → restaurant, region="성수동"
 - "잠실 야구장" → hotspot, region="잠실"
 
@@ -202,15 +269,26 @@ def classify_keyword(kw):
     data.setdefault("is_person", False)
     data.setdefault("is_brand_or_show", False)
 
-    h = heuristic_is_place(kw)
-    if h is False:
-        if data["category"] != "general":
-            log(f"   🛡️ 휴리스틱: {kw} 는 장소 아님 → general 강제")
-        data["category"] = "general"
+    # 0) 예능/드라마 제목이면 무조건 entertainment (장소 분류 차단)
+    if heuristic_is_entertainment(kw):
+        if data["category"] != "entertainment":
+            log(f"   🛡️ 휴리스틱: {kw} 는 예능/드라마 → entertainment 강제")
+        data["category"] = "entertainment"
         data["region"] = None
-    elif h is True and data["category"] == "general":
-        log(f"   🛡️ 휴리스틱: {kw} 는 장소 신호 → hotspot 보정")
-        data["category"] = "hotspot"
+    else:
+        h = heuristic_is_place(kw)
+        if h is False:
+            if data["category"] in ("restaurant", "hotspot"):
+                log(f"   🛡️ 휴리스틱: {kw} 는 장소 아님 → general 강제")
+                data["category"] = "general"
+                data["region"] = None
+        elif h is True and data["category"] == "general":
+            log(f"   🛡️ 휴리스틱: {kw} 는 장소 신호 → hotspot 보정")
+            data["category"] = "hotspot"
+
+    # entertainment는 인물이어도 그대로 유지
+    if data["category"] == "entertainment":
+        return data
 
     if data.get("is_person") or data.get("is_brand_or_show"):
         if data["category"] != "general":
@@ -426,6 +504,37 @@ PRESS_UNSAFE_PATTERNS = [
     r"단독\s*입수",
 ]
 
+# 한국 매체명 — '사진=매체' 또는 '매체 제공'은 매체가 찍은 사진이라 사용 금지
+KOREAN_PRESS_NAMES = [
+    "뉴시스", "연합뉴스", "연합", "뉴스1", "뉴스원", "이데일리", "노컷뉴스",
+    "조선일보", "조선", "동아일보", "동아", "중앙일보", "중앙",
+    "한겨레", "경향신문", "경향", "한국일보", "서울신문", "서울경제",
+    "매일경제", "매경", "한국경제", "한경", "머니투데이", "머투",
+    "MBN", "JTBC", "TV조선", "채널A", "MBC", "KBS", "SBS", "YTN", "EBS",
+    "오마이뉴스", "헤럴드경제", "헤럴드", "데일리안", "쿠키뉴스",
+    "스포츠경향", "스포츠조선", "스포츠동아", "스포츠서울", "스포츠한국",
+    "스포티비뉴스", "엑스포츠뉴스", "OSEN", "마이데일리", "텐아시아",
+    "스타뉴스", "디스패치", "위키트리", "인사이트", "더팩트", "일요신문",
+    "이코노믹리뷰", "비즈워치", "한경비즈니스", "프레시안", "뉴스타파",
+]
+
+
+def _is_korean_press_outlet(name):
+    """이름이 한국 언론 매체인지 판정. 매체면 True (= 사용 금지)."""
+    if not name:
+        return False
+    n = name.strip()
+    if not n:
+        return False
+    for p in KOREAN_PRESS_NAMES:
+        # 정확 매칭 또는 매체명을 포함 (예: '뉴시스 박효신')
+        if p == n or n.startswith(p) or n.endswith(p):
+            return True
+    # 일반 매체명 접미사 패턴
+    if re.search(r"(뉴스$|일보$|신문$|경제$|매거진$|타임즈$|타임스$|미디어$|방송$)", n):
+        return True
+    return False
+
 PRESS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -433,13 +542,32 @@ PRESS_USER_AGENT = (
 
 
 def is_press_image_safe(caption):
-    """캡션이 안전 패턴 매칭이면 True. 위험 패턴 하나라도 있으면 무조건 False."""
+    """
+    안전 캡션이면 True.
+    1) 위험 패턴(기자/DB/자료사진 등) 매칭이면 무조건 False.
+    2) '사진=○○' 또는 '○○ 제공'에서 ○○가 한국 매체명이면 매체 자체 촬영 → False.
+    3) 안전 패턴(제공/사진=/SNS/유튜브/공식/보도자료) 매칭이면 True.
+    """
     if not caption:
         return False
     s = caption.strip()
+
+    # 1) 위험 패턴
     for p in PRESS_UNSAFE_PATTERNS:
         if re.search(p, s):
             return False
+
+    # 2) '사진=뉴시스', '사진=연합뉴스' 같은 매체명 차단
+    m = re.search(r"사진\s*=\s*([가-힣A-Za-z0-9·\- ]+)", s)
+    if m and _is_korean_press_outlet(m.group(1).split()[0]):
+        return False
+
+    # 3) '뉴시스 제공', '연합뉴스 제공' 같은 매체명 차단
+    m = re.search(r"([가-힣A-Za-z0-9·\-]+)\s*제공", s)
+    if m and _is_korean_press_outlet(m.group(1)):
+        return False
+
+    # 4) 안전 패턴
     for p in PRESS_SAFE_PATTERNS:
         if re.search(p, s):
             return True
@@ -816,30 +944,40 @@ def find_parking(df, region, kw):
 
 
 def build_parking_block(parking_df, kw):
-    """장소/핫플 글에만 들어가는 주차 정보 박스 (거지주차.com 메인 CTA)"""
+    """
+    장소/핫플 글에만 들어가는 주차 안내 (거지주차.com 자연 유입).
+    톤: 광고 박스 X, 친구가 알려주는 꿀팁 X. "근처 주차 두 곳 정도 봐뒀어요" 톤.
+    """
     if parking_df is None or parking_df.empty:
-        return ""
+        # 매칭 안 되면 가벼운 한 줄 안내만
+        return f"""
+<div style="margin:32px 0;padding:16px 18px;background:#fafafa;
+            border-radius:12px;font-size:14px;line-height:1.7;color:#444;">
+  <b>🚗 가실 거면 주차도 한 번 보고 가세요</b><br>
+  {kw} 근처 주차장이랑 시세는
+  <a href="https://거지주차.com/" rel="nofollow"
+     style="color:#ff5722;font-weight:bold;text-decoration:none;">거지주차.com</a>
+  에서 한 번에 확인할 수 있어요. 주말엔 자리 빨리 차니까 미리 체크하시는 거 추천!
+</div>
+"""
     rows = ""
-    for _, p in parking_df.head(3).iterrows():
+    for _, p in parking_df.head(2).iterrows():
         name = str(p.get("장소명", "")).strip()
         addr = str(p.get("주소", "")).strip()
         rows += (
-            f"<li style='margin-bottom:10px;'>"
-            f"<b>📍 {name}</b><br>"
-            f"<span style='color:#555;font-size:14px;'>{addr}</span></li>"
+            f"<li style='margin-bottom:8px;'>"
+            f"<b>📍 {name}</b> "
+            f"<span style='color:#777;font-size:13px;'>· {addr}</span></li>"
         )
     return f"""
-<div style="background:linear-gradient(135deg,#fff8e1,#ffe0b2);
-            padding:22px;border-radius:16px;margin:32px 0;
-            border-left:6px solid #ff8f00;">
-  <h3 style="margin:0 0 12px 0;font-size:20px;">🚗 {kw} 갈 때 알짜 주차 꿀팁</h3>
-  <ul style="line-height:1.7;padding-left:20px;margin:0 0 16px 0;">{rows}</ul>
-  <a href="https://거지주차.com/"
-     style="display:inline-block;background:#ff5722;color:#fff;
-            padding:11px 20px;border-radius:10px;text-decoration:none;
-            font-weight:bold;font-size:15px;">
-     👉 거지주차.com에서 더 알짜 주차장 보기
-  </a>
+<div style="margin:32px 0;padding:18px 20px;background:#fff8e7;
+            border-radius:12px;font-size:14px;line-height:1.75;color:#333;">
+  <b style="font-size:15px;">🚗 가실 거면 근처 주차 한 번 보고 가세요</b>
+  <ul style="margin:10px 0 12px 0;padding-left:18px;">{rows}</ul>
+  <span style="color:#555;">더 가까운 주차장이랑 시세 비교는
+    <a href="https://거지주차.com/" rel="nofollow"
+       style="color:#ff5722;font-weight:bold;text-decoration:none;">거지주차.com</a>
+    에서 바로 볼 수 있어요. 주말엔 자리 금방 차니까 미리!</span>
 </div>
 """
 
@@ -890,6 +1028,21 @@ TITLE_STYLES_PLACE = [
     ("비교 톤", '"{kw} vs 평소 가던 곳, 결론은"'),
 ]
 
+TITLE_STYLES_ENTERTAINMENT = [
+    ("회차 리액션", '"{kw}, 어제 그 장면 보고 진짜 깜짝"'),
+    ("스포 주의 톤", '"{kw} 이번 주 흐름 정리 (스포 살짝)"'),
+    ("출연자 화제", '"{kw}에서 제일 화제인 그 사람"'),
+    ("커플 라인", '"{kw}, 이 라인 진짜 진심인 듯"'),
+    ("반응 모음", '"{kw} 보고 댓글 반응이 미쳤다"'),
+    ("커밍순 톤", '"{kw} 다음 회차 떡밥 정리"'),
+    ("팬 시점", '"{kw}, 팬으로서 솔직히 한 마디"'),
+    ("의외 포인트", '"{kw}에서 의외였던 장면"'),
+    ("관계도 톤", '"{kw} 관계도, 한눈에 정리"'),
+    ("화제성 톤", '"{kw}, 왜 다들 이 얘기만 해?"'),
+    ("OTT 추천 톤", '"{kw} 안 봤으면 이번 주말 정주행각"'),
+    ("드라마 톤", '"{kw}, 결국 이 장면이 답이었다"'),
+]
+
 
 def generate_post(kw, info, news_ctx=""):
     cat = info["category"]
@@ -897,6 +1050,8 @@ def generate_post(kw, info, news_ctx=""):
     # 매번 다른 제목 스타일 강제
     if cat in ("restaurant", "hotspot"):
         style_label, style_example = random.choice(TITLE_STYLES_PLACE)
+    elif cat == "entertainment":
+        style_label, style_example = random.choice(TITLE_STYLES_ENTERTAINMENT)
     else:
         style_label, style_example = random.choice(TITLE_STYLES_GENERAL)
 
@@ -918,7 +1073,62 @@ def generate_post(kw, info, news_ctx=""):
     else:
         ctx_block = ""
 
-    if cat in ("restaurant", "hotspot"):
+    if cat == "entertainment":
+        person_warn = (
+            "실존 인물·연예인 관련 글: 단정 평가, 사생활 추측, 외모 평가 금지. "
+            "공식 발표·뉴스 인용·시청자 반응만. 확정 안 된 건 '~라고 알려졌다' 톤."
+        )
+        prompt = f"""너는 한국의 연예·예능 가십 블로거야. 키워드 "{kw}"로 모바일 최적화 글을 써줘.
+{ctx_block}
+[목표]
+- '구기동 프렌즈', '나는솔로', '솔로지옥' 같은 예능/드라마/연애 프로그램, 또는 출연자 가십.
+- **절대 "다녀온 후기", "갔더니" 같은 장소 후기 톤 금지.** (예능 제목에 지역명 들어가도 다녀온 곳 아님!)
+- 시청자 반응·회차 흐름·출연자 라인업·화제 장면 위주로.
+
+[필수 콘텐츠 — 뉴스 컨텍스트 안에서만]
+1) 무슨 프로그램/누구인지 한 줄
+2) 최근 어떤 회차/장면/사건이 화제인지
+3) 누가 누구랑 무슨 관계/케미인지 (커플 라인, 출연진 반응)
+4) 다음 회차 떡밥 또는 시청 포인트
+
+[톤 & 분량]
+- 친구 카톡 가십 톤: "어제 그 장면 봤어?", "솔직히 ~한 거 같지 않아?", "댓글 보니까 다들~".
+- 한 문단 1~2문장. 줄바꿈 자주.
+- 본문 전체 400~600자.
+- 이모지는 H2 헤딩에만 1개씩.
+- {person_warn}
+
+[구조 - 정확히]
+H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
+<h2>📺 도입 (어떤 프로그램/누구의 어떤 장면)</h2>
+[IMG]
+한두 문장.
+
+<h2>🔥 이번 회차/사건 핵심 (뉴스 인용)</h2>
+[IMG]
+한두 문장.
+
+<h2>💬 출연진/시청자 반응</h2>
+[IMG]
+한두 문장.
+
+<h2>👀 다음 회차 떡밥 / 시청 포인트</h2>
+[IMG]
+한두 문장.
+
+[제목 스타일]
+반드시 **"{style_label}"** 으로 작성. 예시 톤: {style_example}
+- 베끼지 말고 톤만 가져와 새로.
+- "정리해 봤어요", "이래서 핫" 같은 흔한 표현 금지.
+- 제목에 "주차" 단어 금지.
+
+[출력 형식 - 오직 JSON만]
+{{
+  "title": "글 제목 (40자 이내)",
+  "content_html": "<h2>...</h2>[IMG]... HTML"
+}}"""
+
+    elif cat in ("restaurant", "hotspot"):
         role = "맛집·핫플 정보 블로거" if cat == "restaurant" else "동네 핫플 가이드 블로거"
         body_focus = (
             "어떤 음식·분위기·시간대 추천·같이 가면 좋은 사람"
@@ -1048,11 +1258,23 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         # 폴백 제목도 스타일 풀에서
         title = style_example.strip('"').format(kw=kw)
 
-    # 일반 글 제목에 "주차" 누락 방지(혹시라도 들어가면 제거)
-    if cat == "general":
+    # 일반/엔터 글 제목에 "주차" 누락 방지
+    if cat in ("general", "entertainment"):
         title = re.sub(r"\s*주차[^\s]*", "", title).strip()
         if not title:
             title = style_example.strip('"').format(kw=kw)
+
+    # 본문 너무 짧으면 (응답이 잘림) None 반환 → 발행 스킵
+    plain_text_len = len(re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content))
+    if plain_text_len < 200:
+        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자) — 응답 잘림 의심, 스킵")
+        return None, None
+
+    # H2가 충분히 안 들어왔으면(잘린 글) 스킵
+    h2_count = len(re.findall(r"<h2", content, flags=re.IGNORECASE))
+    if h2_count < 3:
+        log(f"   ⚠️ H2 헤딩 {h2_count}개만 — 글 구조 미완, 스킵")
+        return None, None
 
     return title, content
 
@@ -1302,6 +1524,11 @@ def run_bot():
 
         log(f"\n🔥 [{kw}] 처리 시작")
         try:
+            # ⓪ 추상 키워드 차단 (자영업/절감/재테크/맛집 등 단독)
+            if is_too_abstract(kw):
+                log(f"   ⏭️  추상 키워드 → 콘텐츠로 다루기 부적절, 스킵")
+                continue
+
             # ① 중복 체크 (토큰 단위, 7일 윈도 + within-run)
             if is_recent_duplicate(kw, recent_titles):
                 log(f"   ⏭️  최근에 이미 발행됨, 스킵")
@@ -1317,12 +1544,12 @@ def run_bot():
             news_ctx = build_news_context(news_items)
             log(f"   → 뉴스 컨텍스트: {len(news_items)}건 / {len(news_ctx)}자")
 
-            # general 카테고리는 뉴스 컨텍스트가 빈약하면 발행 스킵 (낚시 글 방지)
-            if info["category"] == "general" and len(news_ctx) < 200:
+            # general/entertainment는 뉴스 컨텍스트가 빈약하면 발행 스킵 (낚시 글 방지)
+            if info["category"] in ("general", "entertainment") and len(news_ctx) < 200:
                 log("   ⏭️  뉴스 컨텍스트 부족 → 사실 기반 작성 불가, 스킵")
                 continue
 
-            # ④ 이미지 수집 (Tier 0: news_items 재사용, 메타·광고 차단)
+            # ④ 이미지 수집 (Tier 0: news_items 재사용, 메타·광고·매체촬영 차단)
             queries = info.get("image_queries") or [kw]
             images = collect_images(
                 queries, kw=kw, category=info["category"],
@@ -1337,6 +1564,9 @@ def run_bot():
 
             # ⑤ 본문/제목 생성 (뉴스 컨텍스트 기반)
             title, article_html = generate_post(kw, info, news_ctx)
+            if not title or not article_html:
+                log("   ⏭️  글 생성 실패/잘림 — 스킵")
+                continue
             # 한국어 조사 자동 결정 ("이/가" → "이" or "가")
             title = resolve_korean_particles(title)
             article_html = resolve_korean_particles(article_html)
