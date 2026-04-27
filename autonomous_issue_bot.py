@@ -47,31 +47,48 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 auth = HTTPBasicAuth(WP_USER, WP_APP_PW)
 
 
-# --- [Gemini 재시도 래퍼] ---
-def gemini_generate(contents, max_retries=3, label=""):
+# --- [Gemini 모델 폴백 체인 + 재시도 래퍼] ---
+# primary 모델이 503이어도 다른 모델은 살아있을 가능성이 높아 자동 폴백
+MODEL_FALLBACK_CHAIN = [
+    MODEL_ID,                  # gemini-2.5-flash (primary)
+    "gemini-2.5-flash-lite",   # 더 가벼움, 부하 적음
+    "gemini-2.0-flash",        # 이전 세대지만 안정적
+    "gemini-1.5-flash",        # 마지막 안전망
+]
+
+
+def gemini_generate(contents, label=""):
     """
-    503/429/500/502/504 같은 일시적 에러에 지수 백오프로 재시도.
-    실패 시 마지막 예외 그대로 raise.
+    primary 모델에서 백오프 재시도 (3회), 끝까지 503이면 폴백 모델로.
+    503/429/500/502/504/RESOURCE_EXHAUSTED 같은 일시적 에러만 retry.
     """
-    delays = [2, 5, 12]  # seconds
+    delays_primary = [2, 5, 10]
     last_err = None
-    for attempt in range(max_retries):
-        try:
-            return client.models.generate_content(model=MODEL_ID, contents=contents)
-        except Exception as e:
-            last_err = e
-            err_str = str(e)
-            retryable = any(
-                code in err_str
-                for code in ["503", "UNAVAILABLE", "429", "500", "502", "504",
-                             "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL"]
-            )
-            if not retryable or attempt == max_retries - 1:
-                raise
-            wait = delays[min(attempt, len(delays) - 1)]
-            log(f"   ⏳ Gemini {label} 일시 오류 → {wait}초 후 재시도 "
-                f"({attempt + 1}/{max_retries}): {err_str[:90]}")
-            time.sleep(wait)
+    for model_idx, model in enumerate(MODEL_FALLBACK_CHAIN):
+        is_primary = (model_idx == 0)
+        retries = 3 if is_primary else 1  # primary는 3번, 폴백은 1번씩
+        for attempt in range(retries):
+            try:
+                if not is_primary and attempt == 0:
+                    log(f"   🔁 Gemini[{model}]로 폴백 시도")
+                return client.models.generate_content(model=model, contents=contents)
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                retryable = any(
+                    c in err_str for c in [
+                        "503", "UNAVAILABLE", "429", "500", "502", "504",
+                        "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL",
+                    ]
+                )
+                if not retryable:
+                    raise
+                if attempt < retries - 1:
+                    wait = delays_primary[min(attempt, len(delays_primary) - 1)]
+                    log(f"   ⏳ Gemini[{model}] {label} 재시도 "
+                        f"({attempt + 1}/{retries}, {wait}s): {err_str[:80]}")
+                    time.sleep(wait)
+                # else: 다음 모델로
     if last_err:
         raise last_err
 
@@ -194,22 +211,32 @@ def is_nonfit_topic(kw):
 # 스포츠 키워드 휴리스틱 (선수/팀/리그)
 KNOWN_SPORTS = [
     # 축구
-    "손흥민", "김민재", "이강인", "황희찬", "황의조", "이재성",
-    "토트넘", "바르셀로나", "레알 마드리드", "맨체스터", "맨유",
-    "아스널", "리버풀", "첼시", "PSG", "유벤투스", "바이에른",
-    "리버풀", "EPL", "라리가", "분데스리가", "챔피언스리그", "UCL",
-    # 야구
-    "허수봉", "kt 위즈", "두산 베어스", "LG 트윈스", "삼성 라이온즈",
-    "KIA 타이거즈", "롯데 자이언츠", "키움 히어로즈", "SSG 랜더스",
-    "한화 이글스", "NC 다이노스", "KBO", "오타니", "이정후", "김하성",
+    "손흥민", "김민재", "이강인", "황희찬", "황의조", "이재성", "조규성",
+    "토트넘", "바르셀로나", "레알 마드리드", "맨체스터", "맨유", "맨시티",
+    "아스널", "리버풀", "첼시", "PSG", "유벤투스", "바이에른", "도르트문트",
+    "EPL", "라리가", "분데스리가", "챔피언스리그", "UCL", "K리그",
+    # 야구 (선수)
+    "고우석", "오타니", "이정후", "김하성", "류현진", "김광현", "양현종",
+    "박찬호", "추신수", "강백호", "박병호", "김혜성", "노시환",
+    "최지만", "이대호", "김연수", "박해민", "이정후", "김도영",
+    # 야구 (팀)
+    "kt 위즈", "두산 베어스", "LG 트윈스", "삼성 라이온즈",
+    "KIA 타이거즈", "kia 타이거즈", "롯데 자이언츠", "키움 히어로즈",
+    "SSG 랜더스", "한화 이글스", "NC 다이노스", "KBO", "MLB",
     # 배구
-    "전광인", "임도헌", "라경민", "박세영", "김연경", "한선수",
+    "허수봉", "전광인", "임도헌", "라경민", "박세영", "김연경", "한선수",
     "여자배구", "남자배구", "V리그",
+    # 농구
+    "허훈", "이정현", "허웅", "송교창", "라건아", "KBL", "WKBL",
     # e스포츠
     "페이커", "쵸비", "구마유시", "케리아", "오너",
-    "LCK", "LPL", "롤드컵", "T1", "DK", "젠지",
-    # 일반
-    "월드컵", "올림픽", "아시안게임", "WBC",
+    "LCK", "LPL", "롤드컵", "T1", "DK", "젠지", "한화 e스포츠",
+    # 격투기/UFC
+    "정찬성", "박정민", "UFC", "ONE Championship",
+    # 골프
+    "박세리", "박인비", "고진영", "임성재", "PGA", "LPGA", "KPGA",
+    # 일반 대회
+    "월드컵", "올림픽", "아시안게임", "WBC", "프리미어리그",
 ]
 SPORTS_HINTS = [
     "선수", "감독", "프로", "리그", "구단", "결승", "예선",
@@ -233,6 +260,52 @@ def heuristic_is_sports(kw):
     return False
 
 
+def classify_by_news_context(items, kw):
+    """
+    Gemini가 다 죽었을 때, 네이버 뉴스 검색 결과의 제목+요약을 단서로 카테고리 결정.
+    sports / entertainment / restaurant / hotspot 중 가장 강한 신호로 분류.
+    None 반환이면 SKIP.
+    """
+    if not items:
+        return None
+    blob = " ".join((it.get("title", "") + " " + it.get("desc", "")) for it in items[:8])
+    blob_low = blob.lower()
+
+    sports_score = 0
+    for t in KNOWN_SPORTS:
+        if t.lower() in blob_low:
+            sports_score += 2
+    for h in SPORTS_HINTS:
+        sports_score += blob.count(h)
+
+    ent_score = 0
+    for t in KNOWN_ENTERTAINMENT:
+        if t in blob:
+            ent_score += 2
+    for h in ENTERTAINMENT_HINTS:
+        ent_score += blob.count(h)
+
+    place_score = 0
+    for h in PLACE_HINTS:
+        place_score += blob.count(h)
+    # 음식/카페 강한 신호
+    for h in ["맛집", "디저트", "베이글", "파스타", "초밥", "라멘", "베이커리"]:
+        if h in blob:
+            place_score += 2
+
+    log(f"   📰 뉴스기반 분류 점수: sports={sports_score} ent={ent_score} place={place_score}")
+
+    # 임계값: 가장 높은 점수가 3점 이상이고, 나머지보다 1.5배 이상 높을 때만 채택
+    scores = {"sports": sports_score, "entertainment": ent_score, "hotspot": place_score}
+    best = max(scores, key=scores.get)
+    best_score = scores[best]
+    others = [v for k, v in scores.items() if k != best]
+    second = max(others) if others else 0
+    if best_score >= 3 and best_score >= second * 1.5:
+        return best
+    return None
+
+
 
 NON_PLACE_HINTS = [
     "선수", "감독", "프로", "리그", "올림픽", "월드컵", "결승", "예선",
@@ -250,17 +323,34 @@ KNOWN_PERSON_OR_BRAND = [
 ]
 # 예능·연애 프로그램·드라마 제목들 — 핫플로 오인분류되는 거 방지
 KNOWN_ENTERTAINMENT = [
+    # 예능 프로그램
     "나는솔로", "나는 솔로", "나솔", "솔로지옥", "환승연애", "하트시그널",
     "돌싱글즈", "체인지데이즈", "러브캐쳐", "더글로리", "스우파",
-    "런닝맨", "1박2일", "무한도전", "유퀴즈", "유 퀴즈",
+    "런닝맨", "1박2일", "1박 2일", "무한도전", "유퀴즈", "유 퀴즈",
     "라디오스타", "놀면뭐하니", "놀면 뭐하니", "구기동 프렌즈",
     "신서유기", "삼시세끼", "골때녀", "골 때리는",
     "꽃보다", "지구마불", "지락이의 상하이", "여고추리반",
     "뿅뿅 지구오락실", "지구오락실", "어쩌다 사장", "전지적 참견",
-    "독박투어", "손현주의 간이역",
+    "독박투어", "손현주의 간이역", "동상이몽",
+    "이혼숙려캠프", "오은영의", "금쪽같은", "금쪽 상담소",
     # 드라마
     "오징어게임", "오징어 게임", "지옥에서 온 판사", "내남편과 결혼해줘",
-    "정년이", "굿파트너", "지옥",
+    "정년이", "굿파트너", "지옥", "더 글로리",
+    # MC/예능인 (자주 노출되는 인물)
+    "유재석", "강호동", "신동엽", "김종국", "이수근", "김준호",
+    "박나래", "장도연", "양세형", "양세찬", "탁재훈",
+    "이혁재", "김정태", "김원훈", "이용진", "이상훈", "조세호",
+    "이영자", "송은이", "김숙", "박미선", "이경규",
+    "노홍철", "정형돈", "정준하", "지석진", "전현무", "김국진",
+    # 가수/아이돌 그룹
+    "BTS", "방탄소년단", "방탄", "뉴진스", "아이브", "에스파", "르세라핌",
+    "세븐틴", "스트레이키즈", "엔하이픈", "투바투", "TXT", "ENHYPEN",
+    "블랙핑크", "트와이스", "있지", "ITZY", "뉴진스", "RIIZE", "라이즈",
+    "아이유", "임영웅", "박효신", "김호중", "장윤정", "송가인",
+    # 배우 (드라마 자주 화제)
+    "정해인", "송혜교", "송중기", "이병헌", "한지민", "김혜수",
+    "공유", "이민호", "박서준", "김수현", "전지현", "박보영",
+    "이정재", "정우성", "안성기", "마동석",
 ]
 ENTERTAINMENT_HINTS = [
     "예능", "드라마", "방송", "출연진", "출연자", "방영", "회차",
@@ -1754,20 +1844,27 @@ def run_bot():
                 log(f"   ⏭️  최근에 이미 발행됨, 스킵")
                 continue
 
-            # ② 분류
+            # ② 분류 (Gemini 503이어도 휴리스틱이 살림)
             info = classify_keyword(kw)
             log(f"   → 분류: category={info['category']} region={info.get('region')} "
                 f"is_person={info.get('is_person')} is_brand={info.get('is_brand_or_show')}")
 
-            # ②-B 카테고리 화이트리스트 게이트 (restaurant/hotspot/entertainment/sports만 발행)
-            if info["category"] not in ALLOWED_CATEGORIES:
-                log(f"   ⏭️  허용 카테고리 아님 ({info['category']}) → 스킵")
-                continue
-
-            # ③ 이슈 컨텍스트 수집 (네이버 뉴스) — 글의 사실 근거
+            # ③ 이슈 컨텍스트 수집 (네이버 뉴스) — 분류 폴백 + 글의 사실 근거 양쪽
             news_items = fetch_naver_news_items(kw, display=10)
             news_ctx = build_news_context(news_items)
             log(f"   → 뉴스 컨텍스트: {len(news_items)}건 / {len(news_ctx)}자")
+
+            # ②-B 분류가 SKIP이면 뉴스 본문으로 한 번 더 보정 시도
+            if info["category"] not in ALLOWED_CATEGORIES:
+                cat_from_news = classify_by_news_context(news_items, kw)
+                if cat_from_news in ALLOWED_CATEGORIES:
+                    log(f"   🛡️ 뉴스기반 보정: SKIP → {cat_from_news}")
+                    info["category"] = cat_from_news
+
+            # ②-C 화이트리스트 게이트 (restaurant/hotspot/entertainment/sports만 발행)
+            if info["category"] not in ALLOWED_CATEGORIES:
+                log(f"   ⏭️  허용 카테고리 아님 ({info['category']}) → 스킵")
+                continue
 
             # 인물 키워드는 사실 기반이 더 중요 → 더 빡센 임계값
             is_person = bool(info.get("is_person"))
