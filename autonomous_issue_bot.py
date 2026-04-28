@@ -1813,6 +1813,40 @@ def resolve_korean_particles(text):
 
 
 # --- [모바일 가독성 후처리] ---
+def strip_h2_meta_parens(html):
+    """
+    H2 텍스트 안의 가이드 괄호 강제 제거.
+    예: '🔥 왜 핫할까? (스코어·기록 인용)' → '🔥 왜 핫할까?'
+    Gemini가 프롬프트의 가이드 텍스트를 그대로 출력에 넣는 사고 방지.
+    """
+    META_KEYWORDS = [
+        "한 줄 요약", "한줄 요약", "한줄요약",
+        "뉴스 인용", "뉴스인용", "사실 인용",
+        "스코어", "기록 인용", "기록인용", "숫자 인용",
+        "찬반", "갑론을박", "출연진", "시청 포인트",
+        "다음 경기", "관전 포인트", "회차 떡밥", "다음 회차",
+        "도입", "결론", "정리", "핵심",
+    ]
+
+    def _clean_h2(m):
+        attrs = m.group(1) or ""
+        inner = m.group(2)
+        # 괄호 안에 메타 키워드가 있으면 그 괄호 통째로 제거
+        # ()와 () 둘 다 처리
+        def _strip_paren(pm):
+            content = pm.group(1)
+            if any(k in content for k in META_KEYWORDS):
+                return ""
+            return pm.group(0)  # 메타 아니면 유지
+        cleaned = re.sub(r"\s*\(([^()]*)\)", _strip_paren, inner)
+        cleaned = re.sub(r"\s*\(([^()]*)\)", _strip_paren, cleaned)
+        cleaned = cleaned.rstrip()
+        return f"<h2{attrs}>{cleaned}</h2>"
+
+    return re.sub(r"<h2(\s[^>]*)?>(.*?)</h2>",
+                  _clean_h2, html, flags=re.DOTALL | re.IGNORECASE)
+
+
 def split_paragraphs_for_mobile(html):
     """
     한 <p> 안에 여러 문장이 있으면 문장마다 별도 <p>로 분리해서
@@ -2047,6 +2081,8 @@ def run_bot():
             # 한국어 조사 자동 결정 ("이/가" → "이" or "가")
             title = resolve_korean_particles(title)
             article_html = resolve_korean_particles(article_html)
+            # H2의 가이드 괄호("(한 줄 요약)", "(스코어 인용)" 등) 강제 제거
+            article_html = strip_h2_meta_parens(article_html)
             log(f"   → 제목: {title}")
 
             # ⑤ 이미지 배치
