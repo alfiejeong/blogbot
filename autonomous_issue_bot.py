@@ -16,6 +16,7 @@ def log(msg):
 
 # --- [1. 설정] ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+WP_BASE = "https://whyhot.kr/wp-json/wp/v2"
 WP_APP_PW = os.environ.get("WP_APP_PW")
 UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 PEXELS_KEY = os.environ.get("PEXELS_API_KEY")
