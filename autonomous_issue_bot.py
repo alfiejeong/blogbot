@@ -999,18 +999,24 @@ def caption_matches_keyword(caption, kw):
 
 # 매니지먼트사/기획사/소속사 단서 — 이게 캡션에 있으면 본인 사진 가능성 매우 높음
 MANAGEMENT_COMPANY_HINTS = [
+    # 연예 기획사
     "엔터테인먼트", "엔터", "매니지먼트", "ENT", "기획사",
     "크리에이터스", "크리에이더스", "스튜디오", "컴퍼니",
     "뮤직", "레코드", "프로덕션", "에이전시",
     "패밀리", "팩토리",
+    # 스포츠·공공 단체 (공식 배포 사진)
+    "협회", "연맹", "연합회", "조합", "재단", "위원회", "체육회",
+    "구단", "프로팀", "선수단",
+    "BWF", "FIFA", "UEFA", "AFC", "FIBA", "NBA", "NFL", "MLB", "KBO", "KBL",
 ]
 
 
 def is_management_company_caption(caption):
     """
-    캡션에 매니지먼트/기획사/소속사 단서가 있으면 True.
+    캡션에 매니지먼트/기획사/소속사/협회/연맹 단서가 있으면 True.
     인물 키워드 매칭 검사를 면제하는 화이트리스트.
-    예: '700크리에이더스 제공', 'HYBE 엔터테인먼트 제공', 'SM엔터테인먼트 제공'
+    예: '700크리에이더스 제공', 'HYBE 엔터테인먼트 제공',
+        '대한배드민턴협회 제공', '세계배드민턴연맹 제공'
     """
     if not caption:
         return False
@@ -1259,17 +1265,18 @@ def collect_images(queries, kw, category, target=5, news_items=None,
     log(f"   [tier0 국내언론] {len(pool)}장")
 
     if is_person:
-        # 인물 키워드 — Unsplash/Pexels는 무관한 다른 사람 사진을 줄 위험이 큼.
-        # 위키 → Wikimedia → Picsum (추상) 순으로만 폴백.
+        # 인물 키워드 — Unsplash/Pexels/Picsum 같은 무작위·무관 사진 폴백 전면 비활성.
+        # 본인 사진을 못 찾으면 차라리 글 자체를 스킵하는 게 나음 (run_bot이 처리).
+        # 위키 → Wikimedia만 시도. Picsum 풍경 사진은 절대 사용 X.
         if len(pool) < target:
             add(get_wikipedia_image(kw))
             log(f"   [tier1' 인물-위키] {len(pool)}장")
         if len(pool) < target:
             add(get_wikimedia_search(kw, n=2))
             log(f"   [tier2' 인물-wikimedia] {len(pool)}장")
-        if len(pool) < target:
-            add(get_picsum_filler(kw, n=target - len(pool) + 1))
-            log(f"   [tier3' 인물-picsum 추상] {len(pool)}장")
+        # ❌ Picsum은 인물 키워드에 절대 사용 안 함 (풍경/추상 무작위 사진)
+        if len(pool) == 0:
+            log("   ⛔ 인물 키워드 — 본인 사진 0장. 무관 사진 폴백 안 씀.")
         return pool
 
     # Tier 1: API 키 + 구체 쿼리 (비인물만)
