@@ -16,7 +16,6 @@ def log(msg):
 
 # --- [1. 설정] ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-WP_BASE = "https://whyhot.kr/wp-json/wp/v2"
 WP_APP_PW = os.environ.get("WP_APP_PW")
 UNSPLASH_KEY = os.environ.get("UNSPLASH_ACCESS_KEY")
 PEXELS_KEY = os.environ.get("PEXELS_API_KEY")
@@ -748,13 +747,28 @@ def get_wikimedia_search(query, n=2):
                 continue
             meta = info.get("extmetadata", {}) or {}
             artist_raw = (meta.get("Artist", {}) or {}).get("value", "Wikimedia contributor")
-            artist = re.sub(r"<[^>]+>", "", artist_raw)[:60]
-            lic = (meta.get("LicenseShortName", {}) or {}).get("value", "CC")
-            out.append({
-                "url": src,
-                "alt": query,
-                "credit": f"이미지: {artist} · Wikimedia Commons ({lic})",
-            })
+            artist_clean = re.sub(r"<[^>]+>", "", artist_raw)[:200]
+            credit_raw = (meta.get("Credit", {}) or {}).get("value", "")
+            credit_clean = re.sub(r"<[^>]+>", "", credit_raw)[:200]
+            # Wikimedia에 올라와 있어도 Artist/Credit가 한국 매체사면 차단
+            # (위키 사용자가 매체 사진 올리고 출처만 명시한 경우 → 저작권 위험)
+            combined_attribution = f"{artist_clean} {credit_clean}"
+            if _is_korean_press_outlet(artist_clean.split()[0] if artist_clean else ""):
+                log(f"   ⛔ Wikimedia 이미지 매체사 출처 차단: {artist_clean[:40]}")
+                continue
+            for press in KOREAN_PRESS_NAMES:
+                if press in combined_attribution:
+                    log(f"   ⛔ Wikimedia 이미지 매체사 단서 차단: {press} in {combined_attribution[:60]}")
+                    break
+            else:
+                # 위 for 루프가 break 없이 끝나면 (매체사 아님) 채택
+                lic = (meta.get("LicenseShortName", {}) or {}).get("value", "CC")
+                artist_short = artist_clean[:60]
+                out.append({
+                    "url": src,
+                    "alt": query,
+                    "credit": f"이미지: {artist_short} · Wikimedia Commons ({lic})",
+                })
         return out
     except Exception as e:
         log(f"Wikimedia 실패: {e}")
@@ -1321,18 +1335,36 @@ def collect_images(queries, kw, category, target=5, news_items=None,
 
 # --- [6. 주차 DB] ---
 def find_parking(df, region, kw):
+    """
+    키워드 지역에 정확히 매칭되는 주차장만 반환.
+    매칭 안 되면 빈 DataFrame 반환 → build_parking_block이 일반 안내로 폴백.
+    절대 무관한 지역(예: 송파 글에 강남) 매칭 X.
+    """
     if df is None or df.empty:
         return df
+    # 1) region 직접 매칭 (예: '송파', '성수동')
     if region:
         m = df[df["주소"].astype(str).str.contains(region, na=False)]
         if not m.empty:
             return m
-    if kw and len(kw) >= 2:
-        m = df[df["주소"].astype(str).str.contains(kw[:2], na=False)]
-        if not m.empty:
-            return m
-    m = df[df["주소"].astype(str).str.contains(random.choice(["강남", "성수", "홍대"]), na=False)]
-    return m
+    # 2) 키워드에서 지역 토큰 추출 시도
+    if kw:
+        # 키워드 전체에서 '구/동' 패턴 찾기
+        import re as _re
+        region_match = _re.search(r"([가-힣]{2,})(구|동)", kw)
+        if region_match:
+            tok = region_match.group(0)  # '송파구' 또는 '성수동'
+            m = df[df["주소"].astype(str).str.contains(tok, na=False)]
+            if not m.empty:
+                return m
+        # 또는 키워드 첫 토큰 (단, 한글 2자 이상 + 추상명사 아닌 것)
+        first_token = kw.strip().split()[0] if kw.strip() else ""
+        if len(first_token) >= 2 and first_token not in {"맛집", "카페", "디저트", "핫플", "팝업"}:
+            m = df[df["주소"].astype(str).str.contains(first_token[:2], na=False)]
+            if not m.empty:
+                return m
+    # 3) 매칭 실패 → 빈 DF (강남/성수/홍대 랜덤 폴백 제거)
+    return df.iloc[0:0]
 
 
 def build_parking_block(parking_df, kw):
@@ -1888,7 +1920,7 @@ def wrap_post_for_mobile(html):
 
 
 def sanitize_gemini_html(html):
-    """Gemini가 임의로 넣은 이미지 태그·토큰 전부 제거 (코드가 위치 통제)"""
+    """Gemini가 임의로 넣은 이미지·링크·토큰 전부 제거 (코드가 위치 통제)"""
     # [IMG] / [이미지] / [image] 토큰 제거
     html = re.sub(r"\[\s*(?:IMG|image|이미지)\s*\d*\s*\]", "", html, flags=re.IGNORECASE)
     # 자체 <img> / <figure> 제거 (hero 중복 차단)
@@ -1896,6 +1928,33 @@ def sanitize_gemini_html(html):
     html = re.sub(r"<img\b[^>]*>", "", html, flags=re.IGNORECASE)
     # 마크다운 이미지 ![..](..) 제거
     html = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", html)
+    # 외부 링크 자동 제거 — Gemini가 임의로 박는 외부 매거진/광고/추천 링크
+    # 거지주차.com 링크는 보호 (build_parking_block / build_subtle_footer가 통제)
+    def _strip_link(m):
+        href = m.group(1) or ""
+        text = m.group(2) or ""
+        # 거지주차 / 자체 도메인은 보호
+        if "거지주차" in href or "whyhot.kr" in href:
+            return m.group(0)
+        # 그 외 외부 링크는 텍스트만 남기고 a 태그 제거
+        return text
+    html = re.sub(
+        r'<a\s+[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+        _strip_link, html, flags=re.DOTALL | re.IGNORECASE,
+    )
+    # 마크다운 링크 [text](url) — 외부면 텍스트만 남김
+    def _strip_md_link(m):
+        text = m.group(1) or ""
+        href = m.group(2) or ""
+        if "거지주차" in href or "whyhot.kr" in href:
+            return m.group(0)
+        return text
+    html = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _strip_md_link, html)
+    # 노출된 raw URL (http://... 또는 https://...) 제거
+    html = re.sub(
+        r"\bhttps?://(?!거지주차|whyhot\.kr)[^\s<>\"]+",
+        "", html, flags=re.IGNORECASE,
+    )
     # 첫 H2 이전에 남은 흰 공간 정리
     html = html.lstrip()
     return html
