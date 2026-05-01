@@ -123,9 +123,51 @@ def get_google_trends():
 # 트렌드 RSS에는 핫플/맛집이 거의 안 잡히므로 별도 보강.
 
 PLACE_SUFFIX_POOL = [
-    "맛집", "카페", "디저트", "베이커리", "분위기 좋은 곳",
-    "데이트 코스", "핫플", "브런치", "와인바",
+    # 기본
+    "맛집", "카페", "디저트", "베이커리", "핫플", "팝업스토어",
+    # 음식 종류
+    "파스타", "라멘", "초밥", "한정식", "오마카세", "스시",
+    "베이글", "샌드위치", "브런치", "타코", "버거", "피자",
+    "곱창", "삼겹살", "한우", "냉면", "막국수",
+    "비건 맛집", "샐러드", "포케", "스무디",
+    # 카페 세부
+    "디저트 카페", "감성 카페", "한옥 카페", "루프탑 카페",
+    "베이커리 카페", "디저트 맛집",
+    # 음료/주류
+    "와인바", "위스키바", "칵테일바", "막걸리집", "포차",
+    "수제맥주", "내추럴 와인",
+    # 분위기·상황
+    "데이트 코스", "기념일 맛집", "분위기 좋은 곳", "조용한 카페",
+    "인스타 감성", "회식 장소", "혼밥 맛집",
+    # 시간대
+    "아침 식사", "점심 추천", "저녁 추천", "야식 맛집",
+    # 신상·트렌드
+    "신상 카페", "신상 맛집", "오픈 신상", "팝업",
+    # 가족·동반
+    "아이 동반", "강아지 동반", "노포",
 ]
+
+
+def get_seasonal_place_suffix():
+    """월·요일 기반 시즌 접미사 자동 생성"""
+    from datetime import datetime
+    now = datetime.now()
+    month = now.month
+    weekday = now.weekday()  # 0=월
+    pool = []
+    if month in (3, 4, 5):
+        pool += ["봄 데이트", "벚꽃 카페", "야외 테라스", "꽃 명소"]
+    elif month in (6, 7, 8):
+        pool += ["빙수 맛집", "한강 카페", "여름 데이트", "시원한 음식"]
+    elif month in (9, 10, 11):
+        pool += ["단풍 카페", "가을 산책", "따뜻한 디저트", "노을 맛집"]
+    else:
+        pool += ["따뜻한 디저트", "겨울 데이트", "온수 카페", "전골 맛집"]
+    if weekday in (4, 5):  # 금·토
+        pool += ["주말 핫플", "데이트 코스", "야간 영업"]
+    if weekday in (5, 6):  # 토·일
+        pool += ["브런치 카페", "한적한 점심", "주말 모임"]
+    return pool
 
 
 def get_seed_keywords_from_parking_db(d_df, n=2):
@@ -150,9 +192,11 @@ def get_seed_keywords_from_parking_db(d_df, n=2):
         # 상위 15개 중에서 무작위로 n개 선택 → 매 회차 다양성 확보
         top = [r for r, _ in Counter(regions).most_common(15)]
         picked = random.sample(top, min(n, len(top)))
+        # 기본 풀 + 시즌·요일 접미사 합치기
+        suffix_pool = PLACE_SUFFIX_POOL + get_seasonal_place_suffix()
         seeds = []
         for region in picked:
-            suffix = random.choice(PLACE_SUFFIX_POOL)
+            suffix = random.choice(suffix_pool)
             seeds.append(f"{region} {suffix}")
         log(f"📍 거지주차 DB 시드 키워드 {len(seeds)}개: {seeds}")
         return seeds
@@ -161,37 +205,126 @@ def get_seed_keywords_from_parking_db(d_df, n=2):
         return []
 
 
-def get_user_place_keywords():
-    """
-    사용자가 직접 관리하는 키워드 큐 파일에서 1~2개 픽.
-    파일: place_keywords.txt (저장소 루트). 한 줄에 한 키워드.
-    빈 줄·#로 시작하는 줄은 무시.
-    """
-    try:
-        with open("place_keywords.txt", encoding="utf-8") as f:
-            lines = []
-            for ln in f:
-                ln = ln.strip()
-                if ln and not ln.startswith("#"):
-                    lines.append(ln)
-        if not lines:
-            return []
-        picked = random.sample(lines, min(2, len(lines)))
-        log(f"📝 사용자 큐 시드 키워드 {len(picked)}개: {picked}")
-        return picked
-    except FileNotFoundError:
+def search_naver_blog(query, display=20, sort="date"):
+    """네이버 블로그 검색 API. sort='date'면 최신순"""
+    if not (NAVER_CID and NAVER_CSEC):
         return []
+    try:
+        r = requests.get(
+            "https://openapi.naver.com/v1/search/blog.json",
+            params={"query": query, "display": display, "sort": sort},
+            headers={
+                "X-Naver-Client-Id": NAVER_CID,
+                "X-Naver-Client-Secret": NAVER_CSEC,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        items = r.json().get("items", [])
+        out = []
+        for it in items:
+            title = re.sub(r"<[^>]+>", "", it.get("title", "")).strip()
+            if title:
+                out.append(title)
+        return out
     except Exception as e:
-        log(f"⚠️ 사용자 큐 로드 실패: {e}")
+        log(f"   네이버 블로그 검색 실패: {e}")
+        return []
+
+
+def discover_trending_places_from_blogs(d_df, target=3):
+    """
+    거지주차 DB 동네 + 다양한 접미사로 네이버 블로그 검색 → 최신 글 제목 수집
+    → Gemini가 제목들에서 '실제 가게/장소 이름 + 동네' 키워드 추출.
+    사용자 입력 0, 매 회차 새로운 가게 자동 발견.
+    """
+    if d_df is None or d_df.empty or not (NAVER_CID and NAVER_CSEC):
+        return []
+    try:
+        from collections import Counter
+        # 시드 동네 추출 (DB 인기 동네 5개)
+        regions = []
+        for addr in d_df["주소"].astype(str):
+            for m in re.finditer(r"([가-힣]{2,4})(구|동)", addr):
+                tok = m.group(1)
+                if tok not in {"서울", "경기", "부산", "대구", "인천"}:
+                    regions.append(tok)
+        if not regions:
+            return []
+        top_regions = [r for r, _ in Counter(regions).most_common(10)]
+        seed_regions = random.sample(top_regions, min(3, len(top_regions)))
+
+        # 각 동네 × 다양한 접미사로 시드 쿼리 생성
+        suffix_pool = ["카페", "맛집", "신상", "핫플", "디저트", "팝업"]
+        seed_queries = []
+        for region in seed_regions:
+            suffix = random.choice(suffix_pool)
+            seed_queries.append(f"{region} {suffix}")
+
+        log(f"   🔎 블로그 트렌딩 시드 쿼리: {seed_queries}")
+
+        # 네이버 블로그에서 각 시드별 최신 제목 수집 (총 30~60개)
+        all_titles = []
+        for sq in seed_queries:
+            titles = search_naver_blog(sq, display=15, sort="date")
+            for t in titles:
+                all_titles.append(f"[{sq}] {t}")
+            time.sleep(0.3)
+
+        if not all_titles:
+            return []
+
+        # Gemini로 가게/장소 이름 추출 (1회 호출로 효율 처리)
+        prompt = f"""다음은 네이버 블로그 최신 글 제목 목록이야. 각 제목에서 '실제 가게/장소 이름 + 위치(동네)' 형태의 키워드를 추출해.
+
+[추출 규칙]
+- 형식: "동네 가게이름" 또는 "가게이름 동네" (예: "성수동 어니언", "한남동 노티드")
+- 가게 이름이 분명히 보일 때만. 추측 금지.
+- 광고·홍보·일반 후기는 제외 (예: "맛집 추천", "카페 베스트10" 같은 일반 키워드 X)
+- 음식점·카페·베이커리·팝업 등 핫플 성격 가진 것만
+- 중복 제거
+- 결과는 5개 이내, JSON 배열만 출력 (다른 설명 X)
+
+제목 목록:
+{chr(10).join(all_titles[:50])}
+
+출력 예시:
+["성수동 어니언", "한남동 노티드", "연남동 카멜커피"]"""
+
+        try:
+            res = gemini_generate(prompt, label="discover-places")
+            txt = res.text.strip()
+            txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
+            m = re.search(r"\[.*\]", txt, re.DOTALL)
+            if m:
+                txt = m.group(0)
+            keywords = json.loads(txt)
+            if not isinstance(keywords, list):
+                return []
+            picked = [k.strip() for k in keywords if k and isinstance(k, str)][:target]
+            log(f"📰 블로그 트렌딩 자동 발견 {len(picked)}개: {picked}")
+            return picked
+        except Exception as e:
+            log(f"   Gemini 가게 추출 실패: {e}")
+            return []
+    except Exception as e:
+        log(f"⚠️ 블로그 트렌딩 발견 실패: {e}")
         return []
 
 
 def build_keyword_pool(d_df):
-    """트렌드 + DB 시드 + 사용자 큐를 합쳐 처리할 키워드 풀 구성"""
+    """
+    트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견
+    세 소스 합쳐서 풀 구성. 사용자 직접 입력 영역 0.
+    """
     pool = []
+    # 1) 구글 트렌드 RSS — 속보·연예·스포츠
     pool.extend(get_google_trends())
-    pool.extend(get_seed_keywords_from_parking_db(d_df, n=2))
-    pool.extend(get_user_place_keywords())
+    # 2) 거지주차 DB 시드 — 인기 동네 × 다양한 접미사 (시즌·요일 보강)
+    pool.extend(get_seed_keywords_from_parking_db(d_df, n=3))
+    # 3) 네이버 블로그 트렌딩 — Gemini가 신상 가게 자동 발견
+    pool.extend(discover_trending_places_from_blogs(d_df, target=3))
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
