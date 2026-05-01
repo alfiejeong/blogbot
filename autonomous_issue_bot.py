@@ -837,16 +837,27 @@ PRESS_UNSAFE_PATTERNS = [
 
 # 한국 매체명 — '사진=매체' 또는 '매체 제공'은 매체가 찍은 사진이라 사용 금지
 KOREAN_PRESS_NAMES = [
-    "뉴시스", "연합뉴스", "연합", "뉴스1", "뉴스원", "이데일리", "노컷뉴스",
+    # 종합·통신
+    "뉴시스", "연합뉴스", "연합", "뉴스1", "뉴스원", "News1", "이데일리", "노컷뉴스",
     "조선일보", "조선", "동아일보", "동아", "중앙일보", "중앙",
-    "한겨레", "경향신문", "경향", "한국일보", "서울신문", "서울경제",
-    "매일경제", "매경", "한국경제", "한경", "머니투데이", "머투",
+    "한겨레", "경향신문", "경향", "한국일보", "서울신문",
+    "오마이뉴스", "헤럴드경제", "헤럴드", "데일리안", "쿠키뉴스", "프레시안",
+    "더팩트", "일요신문", "뉴스타파", "위키트리", "인사이트", "한경리얼푸드",
+    # 경제
+    "서울경제", "매일경제", "매경", "한국경제", "한경", "머니투데이", "머투",
+    "이코노믹리뷰", "비즈워치", "한경비즈니스", "MTN", "SBS Biz",
+    "한경닷컴", "매경스타투데이", "매일경제스타투데이",
+    # 방송
     "MBN", "JTBC", "TV조선", "채널A", "MBC", "KBS", "SBS", "YTN", "EBS",
-    "오마이뉴스", "헤럴드경제", "헤럴드", "데일리안", "쿠키뉴스",
+    "TV리포트", "TV조선뉴스",
+    # 스포츠
     "스포츠경향", "스포츠조선", "스포츠동아", "스포츠서울", "스포츠한국",
-    "스포티비뉴스", "엑스포츠뉴스", "OSEN", "마이데일리", "텐아시아",
-    "스타뉴스", "디스패치", "위키트리", "인사이트", "더팩트", "일요신문",
-    "이코노믹리뷰", "비즈워치", "한경비즈니스", "프레시안", "뉴스타파",
+    "스포츠월드", "월드일보", "스포츠투데이", "스포츠Q", "스포츠큐",
+    "스포티비뉴스", "스포티비", "SPOTV", "엑스포츠뉴스", "OSEN",
+    "일간스포츠", "한국스포츠경제", "MK스포츠", "데일리스포츠",
+    # 연예·엔터
+    "마이데일리", "텐아시아", "스타뉴스", "디스패치", "톱스타뉴스",
+    "스타투데이", "에이빙뉴스", "한경연예매거진",
 ]
 
 
@@ -862,7 +873,12 @@ def _is_korean_press_outlet(name):
         if p == n or n.startswith(p) or n.endswith(p):
             return True
     # 일반 매체명 접미사 패턴
-    if re.search(r"(뉴스$|일보$|신문$|경제$|매거진$|타임즈$|타임스$|미디어$|방송$)", n):
+    if re.search(
+        r"(뉴스$|일보$|신문$|경제$|매거진$|타임즈$|타임스$|미디어$|방송$|"
+        r"리포트$|스포츠$|데일리$|투데이$|와이어$|저널$|닷컴$|"
+        r"스타$|매니아$|기자$)",
+        n,
+    ):
         return True
     return False
 
@@ -1225,13 +1241,12 @@ def collect_korean_press_images(items, kw, target=3, require_keyword_match=False
             if not is_press_image_safe(caption):
                 rejected_unsafe += 1
                 continue
-            # 3차: 인물 키워드면 캡션에 본인 이름이 있어야 채택
-            #      단, 매니지먼트사/기획사 제공 캡션은 면제 (본인 사진 가능성 매우 높음)
+            # 3차: 인물 키워드는 캡션에 본인 이름이 반드시 있어야 채택.
+            # 매니지먼트사/기획사 단서만 있고 본인 이름이 없으면 거부
+            # (소속사가 같은 기사에 다른 소속 가수 사진을 함께 배포하는 경우 차단).
             if require_keyword_match and not caption_matches_keyword(caption, kw):
-                if not is_management_company_caption(caption):
-                    rejected_no_kw_match += 1
-                    continue
-                log(f"   ✓ 매니지먼트사 캡션 → 인물 매칭 면제: {caption[:40]}")
+                rejected_no_kw_match += 1
+                continue
             wp_id, wp_url = rehost_image_to_wp(img_src, referer=art_url)
             if not wp_url:
                 continue
@@ -1272,10 +1287,12 @@ def collect_images(queries, kw, category, target=5, news_items=None,
             pool.append(img)
 
     # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
+    # 인물·연예·스포츠 모두 캡션 매칭 강제 — 무관한 다른 인물·선수·출연자 사진 차단
+    require_match = is_person or category in ("entertainment", "sports")
     if news_items:
         add(collect_korean_press_images(
             news_items, kw, target=target,
-            require_keyword_match=is_person,
+            require_keyword_match=require_match,
         ))
     log(f"   [tier0 국내언론] {len(pool)}장")
 
