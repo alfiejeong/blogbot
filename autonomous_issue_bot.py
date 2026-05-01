@@ -1478,6 +1478,88 @@ def collect_korean_press_images(items, kw, target=3, require_keyword_match=False
     return out
 
 
+# --- [Gemini Vision 이미지 의미 검증] ---
+# 캡션·URL 매칭만으로 못 잡는 무관 이미지를 비전 모델이 직접 분석해서 거부.
+# VISION_VERIFY_DISABLED 환경변수를 1로 설정하면 비활성화 (비용 통제용).
+VISION_VERIFY_ENABLED = (
+    os.environ.get("VISION_VERIFY_DISABLED", "").strip()
+    not in {"1", "true", "yes"}
+)
+VISION_VERIFY_THRESHOLD = 6  # 1~10 점수 중 6 이상 통과 (관대하지도 빡세지도 않음)
+
+
+def verify_image_with_vision(image_url, kw, category):
+    """
+    Gemini Vision으로 이미지 내용 분석 → 키워드 관련도 1~10 점수.
+    실패시 None (거부 X, 보수적 통과).
+    """
+    if not image_url:
+        return None
+    try:
+        rr = requests.get(
+            image_url,
+            headers={"User-Agent": PRESS_USER_AGENT},
+            timeout=15,
+        )
+        if rr.status_code != 200 or len(rr.content) < 5_000:
+            return None
+        ctype = rr.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        if not ctype.startswith("image/"):
+            ctype = "image/jpeg"
+        prompt = (
+            f"이 사진이 한국 트렌드 콘텐츠 키워드 '{kw}' "
+            f"(카테고리: {category})와 직접 관련 있는가?\n"
+            "1~3 = 무관 (다른 사람·장소·풍경 등)\n"
+            "4~6 = 약하게 연관 (같은 카테고리지만 키워드 직접 매칭 X)\n"
+            "7~10 = 명확히 매칭 (키워드의 인물·팀·장소·상품)\n"
+            "오직 숫자 하나만 답해. 다른 설명 절대 X."
+        )
+        from google.genai import types
+        res = gemini_generate(
+            [
+                types.Part.from_bytes(data=rr.content, mime_type=ctype),
+                prompt,
+            ],
+            label="vision",
+        )
+        txt = (res.text or "").strip()
+        m = re.search(r"\d+", txt)
+        if not m:
+            return None
+        score = int(m.group(0))
+        return min(max(score, 1), 10)
+    except Exception as e:
+        log(f"   Vision 검증 예외: {str(e)[:80]}")
+        return None
+
+
+def filter_images_by_vision(pool, kw, category):
+    """
+    Vision 점수로 pool 필터링. picsum.photos는 무관·랜덤 필러라 검증 X.
+    검증 실패한 이미지는 보수적 통과 (API 실패 때문에 글 손실 막기).
+    """
+    if not VISION_VERIFY_ENABLED or not pool:
+        return pool
+    log(f"   🔍 Vision 검증: {len(pool)}장")
+    accepted = []
+    for img in pool:
+        url = img.get("url", "")
+        if "picsum.photos" in url:
+            accepted.append(img)
+            continue
+        score = verify_image_with_vision(url, kw, category)
+        credit_short = (img.get("credit", "") or "")[:40]
+        if score is None:
+            accepted.append(img)
+            log(f"   ⚠️ Vision 실패, 통과: {credit_short}")
+        elif score >= VISION_VERIFY_THRESHOLD:
+            accepted.append(img)
+            log(f"   ✓ Vision OK ({score}/10): {credit_short}")
+        else:
+            log(f"   ✗ Vision 거부 ({score}/10): {credit_short}")
+    return accepted
+
+
 def collect_images(queries, kw, category, target=5, news_items=None,
                    is_person=False):
     """
@@ -1517,8 +1599,10 @@ def collect_images(queries, kw, category, target=5, news_items=None,
             add(get_wikimedia_search(kw, n=2))
             log(f"   [tier2' 인물-wikimedia] {len(pool)}장")
         # ❌ Picsum은 인물 키워드에 절대 사용 안 함 (풍경/추상 무작위 사진)
+        # Vision 검증 적용 (인물 키워드는 매칭 정확도가 가장 중요)
+        pool = filter_images_by_vision(pool, kw, category)
         if len(pool) == 0:
-            log("   ⛔ 인물 키워드 — 본인 사진 0장. 무관 사진 폴백 안 씀.")
+            log("   ⛔ 인물 키워드 — Vision 통과 사진 0장. 무관 사진 폴백 안 씀.")
         return pool
 
     # Tier 1: API 키 + 구체 쿼리 (비인물만)
@@ -1552,7 +1636,10 @@ def collect_images(queries, kw, category, target=5, news_items=None,
             add(get_wikimedia_search(q, n=2))
         log(f"   [tier4 wikimedia] {len(pool)}장")
 
-    # Tier 5: Picsum 필러 (절대 실패 안 함)
+    # ── Vision 검증 (Picsum 직전, 모든 실제 후보를 분석)
+    pool = filter_images_by_vision(pool, kw, category)
+
+    # Tier 5: Picsum 필러 (Vision 통과 후에도 부족하면 추상 이미지로 채움)
     if len(pool) < target:
         add(get_picsum_filler(kw, n=target - len(pool) + 1))
         log(f"   [tier5 picsum] {len(pool)}장")
