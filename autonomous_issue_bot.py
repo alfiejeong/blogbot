@@ -1483,6 +1483,22 @@ TITLE_STYLES_ENTERTAINMENT = [
 ]
 
 
+# Yoast SEO Readability 점수 향상용 가이드 — 모든 프롬프트에 공통 주입
+READABILITY_GUIDELINES = """
+[가독성 절대 원칙 — Yoast SEO Readability 점수 향상]
+- **한 문장 60자 이내**. 길어지면 두 문장으로 나눠라. 쉼표로 길게 잇지 말 것.
+- **연결어를 자연스럽게 분포**: '근데', '그런데', '솔직히', '그래서', '그러고 보면',
+  '아무튼', '한편', '게다가', '그래도', '오히려' 등을 문단 사이에 적절히.
+- **능동태 사용**. '되었다'/'지게 되었다'/'~게 된다' 같은 수동·간접 표현 금지.
+  → '발표했다', '시작했다', '내놨다' 같이 능동·직접 표현으로.
+- **같은 단어로 문장 시작 3번 연속 금지**. 예: "그는 ~. 그는 ~. 그는 ~." X
+  → 두 번째·세 번째 문장은 다른 단어로 시작하거나 주어 생략.
+- **어려운 한자어·외래어 줄이기**. '해당 사안에 대해 면밀히 검토할 예정이다' 같은
+  공문서체 X. '이 문제 더 살펴봐야 할 듯' 같은 일상체 ✓.
+- **부정문보다 긍정문**. '어렵지 않다' → '쉽다', '나쁘지 않다' → '괜찮다'.
+"""
+
+
 def generate_post(kw, info, news_ctx=""):
     cat = info["category"]
 
@@ -1510,9 +1526,10 @@ def generate_post(kw, info, news_ctx=""):
 - 뉴스에 안 나온 다른 작품/경기/사건으로 빠지지 말 것.
 - 매체 본문을 그대로 베끼지 말고 자기 말로 풀어쓰기 (저작권 회피).
 - 모르는 부분은 단정하지 말고 "공식 발표로는 ~라고 한다"처럼.
+{READABILITY_GUIDELINES}
 """
     else:
-        ctx_block = ""
+        ctx_block = READABILITY_GUIDELINES
 
     if cat == "sports":
         prompt = f"""너는 한국의 스포츠 가이드 블로거야. 키워드 "{kw}"로 모바일 최적화 글을 써줘.
@@ -1919,6 +1936,100 @@ def wrap_post_for_mobile(html):
     )
 
 
+# --- [Yoast Readability 후처리] ---
+# 패턴 순서 중요: 더 구체적인 것을 먼저
+PASSIVE_PATTERNS = [
+    # 1) 이중수동·문법 오류 제거 (먼저)
+    (r"알려지게 되었다", "알려졌다"),
+    (r"알려지게 됐다", "알려졌다"),
+    (r"되어진다", "된다"),
+    (r"되어졌다", "됐다"),
+    (r"보여진다", "보인다"),
+    (r"보여졌다", "보였다"),
+    # 2) 어색한 수동 표현 정리
+    (r"되어\s*있다", "있다"),
+    (r"되어있다", "있다"),
+    # 3) 단순 구어체화 — '되었다' → '됐다' (가장 마지막. 모든 ~되었다 패턴에 적용)
+    (r"되었다", "됐다"),
+]
+
+
+def reduce_passive_voice(html):
+    """간단한 수동태 → 능동태 자동 치환 (안전한 패턴만)"""
+    for pat, repl in PASSIVE_PATTERNS:
+        html = re.sub(pat, repl, html)
+    return html
+
+
+def warn_consecutive_same_starts(html):
+    """
+    같은 단어로 시작하는 문장 3개 연속이면 로그 경고.
+    자동 수정은 하지 않음 (의미 훼손 위험).
+    """
+    paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", html, flags=re.DOTALL | re.IGNORECASE)
+    starts = []
+    for p in paragraphs:
+        plain = re.sub(r"<[^>]+>", "", p).strip()
+        for sent in re.split(r"(?<=[.!?])\s+", plain):
+            sent = sent.strip()
+            if not sent:
+                continue
+            first_word = re.split(r"\s+", sent)[0]
+            # 조사 떼고 비교. lookbehind로 단어 앞 글자가 있을 때만 조사 제거
+            # → '이'/'그' 단독 단어는 그대로, '그는'의 '는'만 떨어짐
+            first_clean = re.sub(r"(?<=.)[은는이가을를과와의도에서로]+$", "", first_word)
+            if first_clean:
+                starts.append(first_clean)
+    for i in range(len(starts) - 2):
+        if starts[i] == starts[i + 1] == starts[i + 2]:
+            log(f"   ⚠️ 가독성: 같은 단어 '{starts[i]}'(으)로 시작하는 문장 3개 연속")
+            return  # 한 번만 경고, 더 보지 않음
+
+
+def split_long_sentences(html, max_chars=80):
+    """
+    한 문장 80자 넘으면 쉼표·접속어 기준으로 분할 시도.
+    안전한 분할만 (의미 훼손 위험 시 그대로 둠).
+    """
+    def _split_p(m):
+        attrs = m.group(1) or ""
+        content = m.group(2)
+        # 마침표 기준 문장 분리
+        sents = re.split(r"(?<=[.!?])\s+", content.strip())
+        new_sents = []
+        for s in sents:
+            plain = re.sub(r"<[^>]+>", "", s)
+            if len(plain) <= max_chars:
+                new_sents.append(s)
+                continue
+            # 안전 분할: ', 그래서 / , 그런데 / , 근데 / 하지만 / 그리고 / 그러니까' 앞에서 자르기
+            split_re = r"(,\s*(?:그래서|그런데|근데|하지만|그리고|그러니까|그러면|그러고)\s+)"
+            parts = re.split(split_re, s)
+            if len(parts) > 1:
+                # 재조립: 첫 조각 + (구분자 → 새 문장)
+                cur = parts[0].rstrip(", ")
+                buf = [cur + "."]
+                for j in range(1, len(parts), 2):
+                    delim = parts[j].lstrip(", ").strip()
+                    rest = parts[j + 1] if j + 1 < len(parts) else ""
+                    buf.append(f"{delim} {rest.strip()}")
+                new_sents.extend([b for b in buf if b.strip()])
+            else:
+                new_sents.append(s)  # 분할 불가 → 원본 유지
+        return f"<p{attrs}>{' '.join(new_sents)}</p>"
+
+    return re.sub(r"<p(\s[^>]*)?>(.*?)</p>",
+                  _split_p, html, flags=re.DOTALL | re.IGNORECASE)
+
+
+def improve_readability(html):
+    """Yoast Readability 향상 통합 후처리"""
+    html = reduce_passive_voice(html)
+    html = split_long_sentences(html, max_chars=80)
+    warn_consecutive_same_starts(html)  # 경고만, 자동수정 X
+    return html
+
+
 def sanitize_gemini_html(html):
     """Gemini가 임의로 넣은 이미지·링크·토큰 전부 제거 (코드가 위치 통제)"""
     # [IMG] / [이미지] / [image] 토큰 제거
@@ -2157,6 +2268,8 @@ def run_bot():
             hero_img = images[0]
             body_imgs = images[1:] if len(images) > 1 else []
             article_html = distribute_images(article_html, body_imgs)
+            # Yoast Readability 향상: 수동태→능동태, 긴 문장 분할, 경고
+            article_html = improve_readability(article_html)
             # 모바일 가독성: 한 <p>에 여러 문장이 붙어 있으면 분리
             article_html = split_paragraphs_for_mobile(article_html)
             intro_html = build_intro(kw, hero_img, info["category"])
