@@ -112,11 +112,88 @@ def get_google_trends():
                 keywords.append(t.text.strip())
         # 후보 풀을 8개로 넉넉히 (중복 제외 후 MAX_POSTS_PER_RUN 만큼만 발행)
         final = keywords[:8]
-        log(f"✅ 후보 키워드 {len(final)}개: {final}")
+        log(f"✅ 트렌드 키워드 {len(final)}개: {final}")
         return final
     except Exception as e:
         log(f"❌ 트렌드 수집 실패, 기본값 사용: {e}")
         return ["성수동 카페", "잠실 야구장", "강남역 맛집"]
+
+
+# --- [핫플/맛집 보강 키워드 소스] ---
+# 트렌드 RSS에는 핫플/맛집이 거의 안 잡히므로 별도 보강.
+
+PLACE_SUFFIX_POOL = [
+    "맛집", "카페", "디저트", "베이커리", "분위기 좋은 곳",
+    "데이트 코스", "핫플", "브런치", "와인바",
+]
+
+
+def get_seed_keywords_from_parking_db(d_df, n=2):
+    """
+    거지주차 DB에서 빈도 높은 지역명 추출 → 핫플/맛집 키워드 합성.
+    예: '성수동 카페', '한남동 디저트', '강남역 맛집'
+    """
+    if d_df is None or d_df.empty:
+        return []
+    try:
+        from collections import Counter
+        regions = []
+        for addr in d_df["주소"].astype(str):
+            # ○○구 / ○○동 패턴 추출
+            for m in re.finditer(r"([가-힣]{2,4})(구|동)", addr):
+                tok = m.group(1)
+                # '서울구' 같은 광역명 제외
+                if tok not in {"서울", "경기", "부산", "대구", "인천"}:
+                    regions.append(tok)
+        if not regions:
+            return []
+        # 상위 15개 중에서 무작위로 n개 선택 → 매 회차 다양성 확보
+        top = [r for r, _ in Counter(regions).most_common(15)]
+        picked = random.sample(top, min(n, len(top)))
+        seeds = []
+        for region in picked:
+            suffix = random.choice(PLACE_SUFFIX_POOL)
+            seeds.append(f"{region} {suffix}")
+        log(f"📍 거지주차 DB 시드 키워드 {len(seeds)}개: {seeds}")
+        return seeds
+    except Exception as e:
+        log(f"⚠️ DB 시드 생성 실패: {e}")
+        return []
+
+
+def get_user_place_keywords():
+    """
+    사용자가 직접 관리하는 키워드 큐 파일에서 1~2개 픽.
+    파일: place_keywords.txt (저장소 루트). 한 줄에 한 키워드.
+    빈 줄·#로 시작하는 줄은 무시.
+    """
+    try:
+        with open("place_keywords.txt", encoding="utf-8") as f:
+            lines = []
+            for ln in f:
+                ln = ln.strip()
+                if ln and not ln.startswith("#"):
+                    lines.append(ln)
+        if not lines:
+            return []
+        picked = random.sample(lines, min(2, len(lines)))
+        log(f"📝 사용자 큐 시드 키워드 {len(picked)}개: {picked}")
+        return picked
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        log(f"⚠️ 사용자 큐 로드 실패: {e}")
+        return []
+
+
+def build_keyword_pool(d_df):
+    """트렌드 + DB 시드 + 사용자 큐를 합쳐 처리할 키워드 풀 구성"""
+    pool = []
+    pool.extend(get_google_trends())
+    pool.extend(get_seed_keywords_from_parking_db(d_df, n=2))
+    pool.extend(get_user_place_keywords())
+    log(f"🎯 최종 키워드 풀 {len(pool)}개")
+    return pool
 
 
 # --- [3. 중복 체크 (토큰 단위, 7일 윈도)] ---
@@ -2159,11 +2236,70 @@ def upload_featured_image(img):
     return None
 
 
-def post_to_wordpress(title, content, featured_id=None):
+# --- [WordPress 카테고리 자동 매핑·생성] ---
+# 봇 내부 카테고리 → WP 카테고리 (slug, 표시명)
+CATEGORY_TO_WP = {
+    "sports": ("sports", "스포츠"),
+    "entertainment": ("entertainment", "연예·방송"),
+    "hotspot": ("places", "핫플·맛집"),
+    "restaurant": ("places", "핫플·맛집"),
+}
+
+# 슬러그 → WP 카테고리 ID 캐시 (한 번 조회/생성한 건 메모리 캐시)
+_WP_CATEGORY_CACHE = {}
+
+
+def get_or_create_wp_category(slug, name):
+    """
+    WordPress 카테고리 ID를 슬러그로 조회. 없으면 자동 생성.
+    한 번 조회한 건 _WP_CATEGORY_CACHE에 캐시.
+    """
+    if slug in _WP_CATEGORY_CACHE:
+        return _WP_CATEGORY_CACHE[slug]
+    try:
+        r = requests.get(
+            f"{WP_BASE}/categories",
+            params={"slug": slug},
+            auth=auth,
+            timeout=10,
+        )
+        if r.status_code == 200 and r.json():
+            cid = r.json()[0]["id"]
+            _WP_CATEGORY_CACHE[slug] = cid
+            return cid
+        # 없으면 생성
+        rc = requests.post(
+            f"{WP_BASE}/categories",
+            auth=auth,
+            json={"name": name, "slug": slug},
+            timeout=10,
+        )
+        if rc.status_code in (200, 201):
+            cid = rc.json().get("id")
+            _WP_CATEGORY_CACHE[slug] = cid
+            log(f"   🆕 WP 카테고리 생성: {name} (slug={slug}, id={cid})")
+            return cid
+        log(f"   ⚠️ WP 카테고리 생성 실패 {rc.status_code}: {rc.text[:120]}")
+    except Exception as e:
+        log(f"   ⚠️ WP 카테고리 조회/생성 실패: {e}")
+    return None
+
+
+def resolve_category_id(bot_category):
+    """봇 내부 카테고리 → WP 카테고리 ID (없으면 None)"""
+    if bot_category not in CATEGORY_TO_WP:
+        return None
+    slug, name = CATEGORY_TO_WP[bot_category]
+    return get_or_create_wp_category(slug, name)
+
+
+def post_to_wordpress(title, content, featured_id=None, category_ids=None):
     status = "draft" if PUBLISH_AS_DRAFT else "publish"
     payload = {"title": title, "content": content, "status": status}
     if featured_id:
         payload["featured_media"] = featured_id
+    if category_ids:
+        payload["categories"] = category_ids
     return requests.post(f"{WP_BASE}/posts", auth=auth, json=payload, timeout=40)
 
 
@@ -2193,7 +2329,7 @@ def run_bot():
     recent_titles = get_recent_post_titles(days=7, limit=100)
     log(f"🗂  최근 7일 제목 {len(recent_titles)}개 캐시 (중복 차단용)")
 
-    keywords = get_google_trends()
+    keywords = build_keyword_pool(d_df)
     posted_count = 0
 
     for kw in keywords:
@@ -2303,9 +2439,16 @@ def run_bot():
             # 모바일 래퍼(line-height/word-break/font-size)로 전체 감싸기
             full_html = wrap_post_for_mobile(intro_html + article_html + trailer)
 
-            # ⑦ 피처드 이미지 업로드 + 발행
+            # ⑦ 피처드 이미지 업로드 + 카테고리 매핑 + 발행
             featured_id = upload_featured_image(images[0])
-            r = post_to_wordpress(title, full_html, featured_id=featured_id)
+            cat_id = resolve_category_id(info["category"])
+            category_ids = [cat_id] if cat_id else None
+            log(f"   🏷  WP 카테고리: {info['category']} → id={cat_id}")
+            r = post_to_wordpress(
+                title, full_html,
+                featured_id=featured_id,
+                category_ids=category_ids,
+            )
             if r.status_code in (200, 201):
                 state = "draft 저장" if PUBLISH_AS_DRAFT else "발행 완료"
                 log(f"🎉 [{kw}] {state} (id={r.json().get('id')})")
