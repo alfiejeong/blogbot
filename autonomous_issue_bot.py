@@ -41,7 +41,15 @@ TOTAL_IMAGES = 3
 # 워드프레스 테마가 단일 글 상단에 featured 이미지를 자동 렌더하는지 여부.
 # True (기본·대부분 테마): 본문 상단 hero 생략 → theme이 featured로 렌더 → 중복 방지
 # False: 테마가 featured 자동 표시 안 할 때만 → 본문 상단에 hero 직접 삽입
-THEME_AUTO_FEATURED_IMAGE = True
+# 본문 상단에 hero 이미지를 명시적으로 박는다 (대표 이미지 무조건 노출 보장).
+# 테마가 featured_media를 자동 노출하지 않는 케이스에 대비.
+# featured_media도 그대로 업로드 (검색결과 썸네일·OG·소셜 미리보기용).
+THEME_AUTO_FEATURED_IMAGE = False
+
+# 무관한 stock photo 사고 차단 — Unsplash·Pexels·Picsum 전면 비활성.
+# 사용자 정책: stock photo가 글의 신뢰도를 깎는다. 진짜 사진만 쓴다.
+# (실제 사용 사진: press·매니지먼트·SNS·공식 채널·가게 OG·위키 계열만)
+USE_STOCK_PHOTOS = False
 
 # 검토 큐 모드: True면 WP에 status="draft"로 저장 (자동 발행 X).
 # 사용자분이 모바일 워드프레스 앱에서 검토 후 발행 버튼 누르는 형태.
@@ -450,6 +458,9 @@ NONFIT_TOPIC_PATTERNS = [
     "음주운전", "보이스피싱", "마약", "도박",
     "사망", "별세", "타계", "부고", "추모",
     "화재", "교통사고", "사고사",
+    # 복권·도박성
+    "로또", "복권", "당첨번호", "당첨자", "스포츠토토", "토토",
+    "카지노", "베팅", "1등 당첨", "추첨번호",
     # 날씨/재난
     "날씨", "태풍", "지진", "폭우", "폭설", "폭염", "한파",
     "미세먼지", "황사", "장마", "산불", "홍수",
@@ -1358,6 +1369,41 @@ MANAGEMENT_COMPANY_HINTS = [
 ]
 
 
+def caption_priority_score(caption):
+    """
+    캡션을 우선순위 점수로 평가. 본인·구단 공식 SNS가 가장 높음.
+    스포츠·연예인 글에서 매니지먼트사 단순 보도자료보다 SNS 사진을 우선.
+    """
+    if not caption:
+        return 0
+    s = caption
+    # 1순위 (점수 4): 본인·구단 공식 SNS·유튜브
+    sns_patterns = [
+        "인스타그램", "트위터", "유튜브",
+        "Instagram", "Twitter", "YouTube", "Official",
+        "공식 계정", "공식 채널",
+        "X @", " X ", " X.",
+    ]
+    if any(p in s for p in sns_patterns):
+        return 4
+    # 2순위 (점수 3): SNS 일반 표기
+    if "SNS" in s or "페이스북" in s or "Facebook" in s:
+        return 3
+    # 3순위 (점수 2): 매니지먼트·기획사·협회·연맹·구단·공식 홈페이지
+    org_patterns = [
+        "엔터테인먼트", "매니지먼트", "ENT", "기획사",
+        "협회", "연맹", "구단", "프로팀",
+        "공식 홈페이지", "보도자료",
+        "크리에이터스", "크리에이더스",
+    ]
+    if any(p in s for p in org_patterns):
+        return 2
+    # 4순위 (점수 1): 일반 '○○ 제공'
+    if "제공" in s or re.search(r"사진\s*=", s):
+        return 1
+    return 0
+
+
 def is_management_company_caption(caption):
     """
     캡션에 매니지먼트/기획사/소속사/협회/연맹 단서가 있으면 True.
@@ -1679,20 +1725,25 @@ def collect_korean_press_images(items, kw, target=3, require_keyword_match=False
             if not wp_url:
                 continue
             credit = extract_credit_from_caption(caption)
+            priority = caption_priority_score(caption)
             out.append({
                 "url": wp_url,
                 "alt": kw,
                 "credit": credit,
                 "wp_id": wp_id,
                 "source": "press",
+                "_priority": priority,
+                "_raw_caption": caption,
             })
-            log(f"   ✓ 언론 이미지 채택: {credit}")
+            log(f"   ✓ 언론 이미지 채택 (우선순위 {priority}): {credit}")
             if len(out) >= target:
                 break
         time.sleep(0.4)
     log(f"   📰 언론 결과: 채택 {len(out)} / 메타·광고차단 {rejected_meta_ad} / "
         f"위험출처 {rejected_unsafe} / 캡션없음 {rejected_no_caption} / "
         f"키워드불일치 {rejected_no_kw_match}")
+    # 우선순위 정렬 — SNS·공식 4점 > 일반 SNS 3점 > 매니지먼트 2점 > 일반 제공 1점
+    out.sort(key=lambda x: -x.get("_priority", 0))
     return out
 
 
@@ -1826,14 +1877,16 @@ def collect_images(queries, kw, category, target=5, news_items=None,
 
     # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
     # 인물·연예·스포츠 모두 캡션 매칭 강제 — 무관한 다른 인물·선수·출연자 사진 차단
+    # ⚠️ 핫플/맛집은 언론사 사진 사용 X (사용자 정책: 가게 공식·블로그 OG만)
     require_match = is_person or category in ("entertainment", "sports")
-    if news_items and len(pool) < target:
+    if news_items and len(pool) < target and not is_place:
         add(collect_korean_press_images(
             news_items, kw, target=target,
             require_keyword_match=require_match,
             allow_show_capture=allow_show_capture,
         ))
-    log(f"   [tier0 국내언론] {len(pool)}장")
+    if not is_place:
+        log(f"   [tier0 국내언론] {len(pool)}장")
 
     if is_person:
         # 인물 키워드 — Unsplash/Pexels/Picsum 같은 무작위·무관 사진 폴백 전면 비활성.
@@ -1855,15 +1908,16 @@ def collect_images(queries, kw, category, target=5, news_items=None,
     # 핫플/맛집은 generic stock photo가 글의 신뢰도를 깨뜨림.
     # → Pexels/Unsplash/Picsum 같은 무관 이미지 소스 전면 차단.
     # 언론·위키·위키미디어에서만 시도, Vision 통과 못하면 글 발행 스킵.
-    if not is_place:
-        # Tier 1: API 키 + 구체 쿼리 (비인물·비핫플만)
+    # ❌ Tier 1, 2 (Unsplash/Pexels) — USE_STOCK_PHOTOS=False면 자동 비활성
+    # stock photo가 무관 풍경 사진을 흩뿌리는 사고 방지
+    if not is_place and USE_STOCK_PHOTOS:
+        # Tier 1: API 키 + 구체 쿼리
         for q in queries:
             if len(pool) >= target:
                 break
             add(get_unsplash(q, n=2))
             add(get_pexels(q, n=2))
         log(f"   [tier1 구체쿼리] {len(pool)}장")
-
         # Tier 2: API 키 + 카테고리 추상 쿼리
         if len(pool) < target:
             for q in CATEGORY_ABSTRACT_QUERIES.get(category, []):
@@ -1890,12 +1944,12 @@ def collect_images(queries, kw, category, target=5, news_items=None,
     # ── Vision 검증 (Picsum 직전, 모든 실제 후보를 분석)
     pool = filter_images_by_vision(pool, kw, category)
 
-    # Tier 5: Picsum 필러 — 핫플/맛집은 절대 X (generic 풍경)
-    if not is_place and len(pool) < target:
+    # Tier 5: Picsum 필러 — 사용자 정책: USE_STOCK_PHOTOS=False면 picsum도 X
+    if not is_place and USE_STOCK_PHOTOS and len(pool) < target:
         add(get_picsum_filler(kw, n=target - len(pool) + 1))
         log(f"   [tier5 picsum] {len(pool)}장")
-    elif is_place and len(pool) == 0:
-        log("   ⛔ 핫플/맛집 — Vision 통과 사진 0장. Picsum 폴백 안 씀.")
+    elif len(pool) == 0:
+        log(f"   ⛔ {category} — 진짜 사진 0장. stock photo 폴백 안 씀 → 발행 스킵 예정")
 
     return pool
 
@@ -2960,6 +3014,9 @@ def run_bot():
 
             # ⑦ 피처드 이미지 업로드 + 카테고리 매핑 + 발행
             featured_id = upload_featured_image(images[0])
+            if not featured_id:
+                log("   ⛔ 대표 이미지 업로드 실패 — 발행 스킵 (대표 이미지 무조건 보장)")
+                continue
             cat_id = resolve_category_id(info["category"])
             category_ids = [cat_id] if cat_id else None
             log(f"   🏷  WP 카테고리: {info['category']} → id={cat_id}")
