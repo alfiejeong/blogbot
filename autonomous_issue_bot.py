@@ -428,6 +428,37 @@ def is_nonfit_topic(kw):
     return False
 
 
+# 뉴스 컨텍스트에서 검출되면 글 발행 차단하는 핵심 단어
+# (키워드 자체는 멀쩡한데 뉴스 본문이 사건사고/금융이면 그 글은 안전 X)
+NEWS_CONTEXT_NONFIT_TERMS = [
+    # 법적 분쟁
+    "가압류", "압류", "고소", "고발", "기소", "구속영장",
+    "징역", "벌금", "선고", "유죄", "무죄", "재판",
+    # 부동산·금융 분쟁
+    "부동산 가압", "재산 동결", "채무", "파산", "회생",
+    # 사건사고
+    "사망", "별세", "타계", "추모", "분향소",
+    "성폭행", "성추행", "음주운전", "마약", "도박",
+    "자살", "극단적 선택",
+    # 정치·논란성
+    "이혼 소송", "친자 확인",
+]
+
+
+def is_nonfit_news_context(news_ctx):
+    """
+    뉴스 컨텍스트(제목+요약)에 사건사고·금융 분쟁 등의 핵심어가 있으면 True.
+    키워드는 멀쩡한데 맥락이 위험한 경우(예: '민희진' 자체는 OK이지만
+    '민희진 소유 부동산 가압류' 뉴스 맥락이면 SKIP) 차단.
+    """
+    if not news_ctx:
+        return False
+    for term in NEWS_CONTEXT_NONFIT_TERMS:
+        if term in news_ctx:
+            return True
+    return False
+
+
 # 스포츠 키워드 휴리스틱 (선수/팀/리그)
 KNOWN_SPORTS = [
     # 축구
@@ -1022,6 +1053,7 @@ CATEGORY_ABSTRACT_QUERIES = {
 # - "OO 제공", "사진=OO" → 기업 보도자료/공식 배포
 # - "OOO 유튜브", "OOO SNS/인스타그램/페이스북/트위터" → 본인 공개 콘텐츠
 PRESS_SAFE_PATTERNS = [
+    # 한글 패턴
     r"제공",
     r"사진\s*=",
     r"유튜브",
@@ -1032,6 +1064,13 @@ PRESS_SAFE_PATTERNS = [
     r"공식\s*홈페이지",
     r"공식\s*계정",
     r"보도자료",
+    # 영문 패턴 (해외 스포츠 구단 SNS·공식 채널 인식)
+    r"\bTwitter\b",
+    r"\bX\s*@",
+    r"\bInstagram\b",
+    r"\bFacebook\b",
+    r"\bYouTube\b",
+    r"\bOfficial\b",
 ]
 
 # 위험 패턴: 매체 자체 저작권 → 절대 사용 금지
@@ -1098,33 +1137,55 @@ PRESS_USER_AGENT = (
 )
 
 
-def is_press_image_safe(caption):
+SHOW_CAPTURE_PATTERNS = [
+    r"방송\s*화면", r"방송\s*캡처", r"화면\s*캡처", r"화면\s*갈무리",
+    r"캡처\s*화면", r"방송\s*갈무리", r"\bcapture\b", r"드라마\s*화면",
+]
+
+
+def is_show_capture_caption(caption):
+    """예능·드라마 방송 캡처 캡션인지"""
+    if not caption:
+        return False
+    s = caption.strip()
+    for p in SHOW_CAPTURE_PATTERNS:
+        if re.search(p, s, re.IGNORECASE):
+            return True
+    return False
+
+
+def is_press_image_safe(caption, allow_show_capture=False):
     """
     안전 캡션이면 True.
     1) 위험 패턴(기자/DB/자료사진 등) 매칭이면 무조건 False.
-    2) '사진=○○' 또는 '○○ 제공'에서 ○○가 한국 매체명이면 매체 자체 촬영 → False.
-    3) 안전 패턴(제공/사진=/SNS/유튜브/공식/보도자료) 매칭이면 True.
+    2) 방송 캡처 캡션 + allow_show_capture=True 이면 매체명 검사 우회 (저작권법 인용 적용).
+    3) '사진=○○' 또는 '○○ 제공'에서 ○○가 한국 매체명이면 매체 자체 촬영 → False.
+    4) 안전 패턴(제공/사진=/SNS/유튜브/공식/보도자료) 매칭이면 True.
     """
     if not caption:
         return False
     s = caption.strip()
 
-    # 1) 위험 패턴
+    # 1) 위험 패턴 (기자/DB/자료사진 — 매체 자체 저작이라 캡처도 허용 X)
     for p in PRESS_UNSAFE_PATTERNS:
         if re.search(p, s):
             return False
 
-    # 2) '사진=뉴시스', '사진=연합뉴스' 같은 매체명 차단
+    # 2) 방송 캡처 — 예능/드라마 리뷰 글에서만 허용
+    if allow_show_capture and is_show_capture_caption(s):
+        return True
+
+    # 3) '사진=뉴시스' 같은 매체명 차단
     m = re.search(r"사진\s*=\s*([가-힣A-Za-z0-9·\- ]+)", s)
     if m and _is_korean_press_outlet(m.group(1).split()[0]):
         return False
 
-    # 3) '뉴시스 제공', '연합뉴스 제공' 같은 매체명 차단
+    # 4) '뉴시스 제공' 같은 매체명 차단
     m = re.search(r"([가-힣A-Za-z0-9·\-]+)\s*제공", s)
     if m and _is_korean_press_outlet(m.group(1)):
         return False
 
-    # 4) 안전 패턴
+    # 5) 안전 패턴
     for p in PRESS_SAFE_PATTERNS:
         if re.search(p, s):
             return True
@@ -1406,7 +1467,119 @@ def rehost_image_to_wp(image_url, referer=None):
     return None, None
 
 
-def collect_korean_press_images(items, kw, target=3, require_keyword_match=False):
+def search_naver_local(query, n=5):
+    """네이버 지역 검색 — 가게 정보(이름·주소·홈페이지·카테고리) 반환."""
+    if not (NAVER_CID and NAVER_CSEC):
+        return []
+    try:
+        r = requests.get(
+            "https://openapi.naver.com/v1/search/local.json",
+            params={"query": query, "display": min(n, 5)},
+            headers={
+                "X-Naver-Client-Id": NAVER_CID,
+                "X-Naver-Client-Secret": NAVER_CSEC,
+            },
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        out = []
+        for it in r.json().get("items", []):
+            title = re.sub(r"<[^>]+>", "", it.get("title", "") or "").strip()
+            link = it.get("link", "") or ""
+            address = it.get("address", "") or ""
+            road = it.get("roadAddress", "") or ""
+            cat = it.get("category", "") or ""
+            if title:
+                out.append({
+                    "name": title,
+                    "link": link,
+                    "address": road or address,
+                    "category": cat,
+                })
+        return out
+    except Exception as e:
+        log(f"   네이버 지역 검색 실패: {e}")
+        return []
+
+
+def extract_og_image_from_url(url):
+    """페이지 og:image 또는 twitter:image 메타 태그 추출"""
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        r = requests.get(
+            url,
+            headers={"User-Agent": PRESS_USER_AGENT, "Accept-Language": "ko-KR,ko;q=0.9"},
+            timeout=10,
+            allow_redirects=True,
+        )
+        if r.status_code != 200:
+            return None
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        for sel in [
+            ("meta", {"property": "og:image"}),
+            ("meta", {"property": "og:image:url"}),
+            ("meta", {"name": "twitter:image"}),
+            ("meta", {"name": "twitter:image:src"}),
+        ]:
+            tag = soup.find(*sel)
+            if tag and tag.get("content"):
+                content = tag["content"].strip()
+                if content.startswith("http"):
+                    return content
+    except Exception as e:
+        log(f"   OG 이미지 추출 실패 {url[:50]}: {str(e)[:60]}")
+    return None
+
+
+def collect_place_images_via_naver_local(kw, target=3):
+    """
+    네이버 지역 검색 → 가게 홈페이지 → og:image 추출 → WP 재호스팅.
+    핫플/맛집 글 전용. 가게 공식 채널 출처라 저작권 안전.
+    """
+    if not (NAVER_CID and NAVER_CSEC):
+        return []
+    try:
+        from bs4 import BeautifulSoup  # noqa: F401
+    except ImportError:
+        return []
+
+    places = search_naver_local(kw, n=8)
+    if not places:
+        return []
+    log(f"   📍 네이버 지역 검색 후보 {len(places)}건")
+    out = []
+    rejected_no_link = 0
+    rejected_no_og = 0
+    for p in places:
+        if len(out) >= target:
+            break
+        if not p["link"]:
+            rejected_no_link += 1
+            continue
+        og_url = extract_og_image_from_url(p["link"])
+        if not og_url:
+            rejected_no_og += 1
+            continue
+        wp_id, wp_url = rehost_image_to_wp(og_url, referer=p["link"])
+        if not wp_url:
+            continue
+        out.append({
+            "url": wp_url,
+            "alt": p["name"],
+            "credit": f"사진: {p['name']} 공식 홈페이지",
+            "wp_id": wp_id,
+            "source": "naver_local_og",
+        })
+        log(f"   ✓ 가게 OG 이미지 채택: {p['name']}")
+    log(f"   📍 지역 검색 결과: 채택 {len(out)} / 홈페이지 없음 {rejected_no_link} / "
+        f"OG 이미지 없음 {rejected_no_og}")
+    return out
+
+
+def collect_korean_press_images(items, kw, target=3, require_keyword_match=False, allow_show_capture=False):
     """
     0순위 이미지 소스: 국내 언론사 (저작권 안전 캡션만).
     items: fetch_naver_news_items() 결과 (재사용해서 API 절약).
@@ -1448,7 +1621,7 @@ def collect_korean_press_images(items, kw, target=3, require_keyword_match=False
             if not caption:
                 rejected_no_caption += 1
                 continue
-            if not is_press_image_safe(caption):
+            if not is_press_image_safe(caption, allow_show_capture=allow_show_capture):
                 rejected_unsafe += 1
                 continue
             # 3차: 인물 키워드는 캡션에 본인 이름이 반드시 있어야 채택.
@@ -1485,7 +1658,18 @@ VISION_VERIFY_ENABLED = (
     os.environ.get("VISION_VERIFY_DISABLED", "").strip()
     not in {"1", "true", "yes"}
 )
-VISION_VERIFY_THRESHOLD = 6  # 1~10 점수 중 6 이상 통과 (관대하지도 빡세지도 않음)
+VISION_VERIFY_THRESHOLD = 6  # 기본 임계값 (인물·sports·entertainment)
+# 카테고리별 임계값 — 핫플/맛집은 실제 가게 사진이 핵심이라 더 빡세게
+VISION_THRESHOLDS_BY_CATEGORY = {
+    "hotspot": 7,
+    "restaurant": 7,
+    "entertainment": 6,
+    "sports": 6,
+}
+
+
+def get_vision_threshold(category):
+    return VISION_THRESHOLDS_BY_CATEGORY.get(category, VISION_VERIFY_THRESHOLD)
 
 
 def verify_image_with_vision(image_url, kw, category):
@@ -1540,7 +1724,8 @@ def filter_images_by_vision(pool, kw, category):
     """
     if not VISION_VERIFY_ENABLED or not pool:
         return pool
-    log(f"   🔍 Vision 검증: {len(pool)}장")
+    threshold = get_vision_threshold(category)
+    log(f"   🔍 Vision 검증: {len(pool)}장 (임계값 {threshold}/10, 카테고리={category})")
     accepted = []
     for img in pool:
         url = img.get("url", "")
@@ -1552,7 +1737,7 @@ def filter_images_by_vision(pool, kw, category):
         if score is None:
             accepted.append(img)
             log(f"   ⚠️ Vision 실패, 통과: {credit_short}")
-        elif score >= VISION_VERIFY_THRESHOLD:
+        elif score >= threshold:
             accepted.append(img)
             log(f"   ✓ Vision OK ({score}/10): {credit_short}")
         else:
@@ -1578,13 +1763,26 @@ def collect_images(queries, kw, category, target=5, news_items=None,
             seen.add(img["url"])
             pool.append(img)
 
+    # 카테고리 옵션
+    is_place = category in ("hotspot", "restaurant")
+    # 예능·드라마 프로그램 키워드면 방송 캡처 캡션 허용
+    allow_show_capture = (
+        category == "entertainment" and heuristic_is_entertainment(kw)
+    )
+
+    # 핫플/맛집은 0순위로 네이버 지역 검색 + 가게 OG 이미지 (저작권 안전 + 정확)
+    if is_place:
+        add(collect_place_images_via_naver_local(kw, target=target))
+        log(f"   [tier0' 네이버지도/OG] {len(pool)}장")
+
     # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
     # 인물·연예·스포츠 모두 캡션 매칭 강제 — 무관한 다른 인물·선수·출연자 사진 차단
     require_match = is_person or category in ("entertainment", "sports")
-    if news_items:
+    if news_items and len(pool) < target:
         add(collect_korean_press_images(
             news_items, kw, target=target,
             require_keyword_match=require_match,
+            allow_show_capture=allow_show_capture,
         ))
     log(f"   [tier0 국내언론] {len(pool)}장")
 
@@ -1605,22 +1803,26 @@ def collect_images(queries, kw, category, target=5, news_items=None,
             log("   ⛔ 인물 키워드 — Vision 통과 사진 0장. 무관 사진 폴백 안 씀.")
         return pool
 
-    # Tier 1: API 키 + 구체 쿼리 (비인물만)
-    for q in queries:
-        if len(pool) >= target:
-            break
-        add(get_unsplash(q, n=2))
-        add(get_pexels(q, n=2))
-    log(f"   [tier1 구체쿼리] {len(pool)}장")
-
-    # Tier 2: API 키 + 카테고리 추상 쿼리
-    if len(pool) < target:
-        for q in CATEGORY_ABSTRACT_QUERIES.get(category, []):
+    # 핫플/맛집은 generic stock photo가 글의 신뢰도를 깨뜨림.
+    # → Pexels/Unsplash/Picsum 같은 무관 이미지 소스 전면 차단.
+    # 언론·위키·위키미디어에서만 시도, Vision 통과 못하면 글 발행 스킵.
+    if not is_place:
+        # Tier 1: API 키 + 구체 쿼리 (비인물·비핫플만)
+        for q in queries:
             if len(pool) >= target:
                 break
             add(get_unsplash(q, n=2))
             add(get_pexels(q, n=2))
-        log(f"   [tier2 추상쿼리] {len(pool)}장")
+        log(f"   [tier1 구체쿼리] {len(pool)}장")
+
+        # Tier 2: API 키 + 카테고리 추상 쿼리
+        if len(pool) < target:
+            for q in CATEGORY_ABSTRACT_QUERIES.get(category, []):
+                if len(pool) >= target:
+                    break
+                add(get_unsplash(q, n=2))
+                add(get_pexels(q, n=2))
+            log(f"   [tier2 추상쿼리] {len(pool)}장")
 
     # Tier 3: 한국어 위키백과 (키워드 직접)
     if len(pool) < target:
@@ -1639,10 +1841,12 @@ def collect_images(queries, kw, category, target=5, news_items=None,
     # ── Vision 검증 (Picsum 직전, 모든 실제 후보를 분석)
     pool = filter_images_by_vision(pool, kw, category)
 
-    # Tier 5: Picsum 필러 (Vision 통과 후에도 부족하면 추상 이미지로 채움)
-    if len(pool) < target:
+    # Tier 5: Picsum 필러 — 핫플/맛집은 절대 X (generic 풍경)
+    if not is_place and len(pool) < target:
         add(get_picsum_filler(kw, n=target - len(pool) + 1))
         log(f"   [tier5 picsum] {len(pool)}장")
+    elif is_place and len(pool) == 0:
+        log("   ⛔ 핫플/맛집 — Vision 통과 사진 0장. Picsum 폴백 안 씀.")
 
     return pool
 
@@ -2583,6 +2787,12 @@ def run_bot():
             news_items = fetch_naver_news_items(kw, display=10)
             news_ctx = build_news_context(news_items)
             log(f"   → 뉴스 컨텍스트: {len(news_items)}건 / {len(news_ctx)}자")
+
+            # ③-B 뉴스 맥락이 사건사고/금융 분쟁이면 SKIP
+            # (키워드는 인물/장소이지만 뉴스 맥락이 위험한 경우 차단)
+            if is_nonfit_news_context(news_ctx):
+                log("   ⏭️  뉴스 맥락이 사건사고/금융 분쟁 → 안전상 스킵")
+                continue
 
             # ②-B 분류가 SKIP이면 뉴스 본문으로 한 번 더 보정 시도
             if info["category"] not in ALLOWED_CATEGORIES:
