@@ -205,8 +205,8 @@ def get_seed_keywords_from_parking_db(d_df, n=2):
         return []
 
 
-def search_naver_blog(query, display=20, sort="date"):
-    """네이버 블로그 검색 API. sort='date'면 최신순"""
+def search_naver_blog(query, display=20, sort="date", with_meta=False):
+    """네이버 블로그 검색 API. with_meta=True면 [{title, link}] 반환."""
     if not (NAVER_CID and NAVER_CSEC):
         return []
     try:
@@ -225,12 +225,57 @@ def search_naver_blog(query, display=20, sort="date"):
         out = []
         for it in items:
             title = re.sub(r"<[^>]+>", "", it.get("title", "")).strip()
+            link = it.get("link", "") or ""
             if title:
-                out.append(title)
+                if with_meta:
+                    out.append({"title": title, "link": link})
+                else:
+                    out.append(title)
         return out
     except Exception as e:
         log(f"   네이버 블로그 검색 실패: {e}")
         return []
+
+
+def collect_place_images_via_blog(kw, target=3):
+    """
+    가게명으로 네이버 블로그 검색 → 상위 글의 og:image 추출.
+    공식 홈페이지·네이버 지도 OG가 없을 때 폴백 소스.
+    """
+    if not (NAVER_CID and NAVER_CSEC):
+        return []
+    try:
+        from bs4 import BeautifulSoup  # noqa: F401
+    except ImportError:
+        return []
+    items = search_naver_blog(kw, display=10, sort="sim", with_meta=True)
+    if not items:
+        return []
+    log(f"   📝 가게명 블로그 검색 결과 {len(items)}건")
+    out = []
+    seen_src = set()
+    for it in items[:8]:
+        if len(out) >= target:
+            break
+        link = it.get("link", "")
+        if not link:
+            continue
+        og = extract_og_image_from_url(link)
+        if not og or og in seen_src:
+            continue
+        seen_src.add(og)
+        wp_id, wp_url = rehost_image_to_wp(og, referer=link)
+        if not wp_url:
+            continue
+        out.append({
+            "url": wp_url,
+            "alt": kw,
+            "credit": "사진: 관련 블로그 포스트",
+            "wp_id": wp_id,
+            "source": "blog_og",
+        })
+        log(f"   ✓ 블로그 OG 채택: {it['title'][:40]}")
+    return out
 
 
 def discover_trending_places_from_blogs(d_df, target=3):
@@ -1774,6 +1819,10 @@ def collect_images(queries, kw, category, target=5, news_items=None,
     if is_place:
         add(collect_place_images_via_naver_local(kw, target=target))
         log(f"   [tier0' 네이버지도/OG] {len(pool)}장")
+        # 가게 홈페이지 OG가 없으면 블로그 검색으로 폴백
+        if len(pool) < target:
+            add(collect_place_images_via_blog(kw, target=target))
+            log(f"   [tier0'' 가게명 블로그 OG] {len(pool)}장")
 
     # Tier 0: 국내 언론사 (저작권 안전 캡션만, WP 재호스팅 완료)
     # 인물·연예·스포츠 모두 캡션 매칭 강제 — 무관한 다른 인물·선수·출연자 사진 차단
@@ -2002,6 +2051,39 @@ TITLE_STYLES_ENTERTAINMENT = [
 
 
 # Yoast SEO Readability 점수 향상용 가이드 — 모든 프롬프트에 공통 주입
+def _current_time_context():
+    """현재 시점·계절 정보 — 프롬프트에 주입해서 부적절 시즌 표현 차단"""
+    from datetime import datetime
+    now = datetime.now()
+    month = now.month
+    if month in (3, 4, 5):
+        season = "봄"
+        forbidden = "연말, 크리스마스, 산타, 단풍, 낙엽, 빙수, 한여름, 폭염, 겨울"
+    elif month in (6, 7, 8):
+        season = "여름"
+        forbidden = "연말, 크리스마스, 벚꽃, 단풍, 낙엽, 한파, 폭설, 겨울"
+    elif month in (9, 10, 11):
+        season = "가을"
+        forbidden = "연말, 크리스마스(11월 한정), 벚꽃, 빙수, 한여름, 폭염, 한파"
+        if month == 12:
+            forbidden = "벚꽃, 빙수, 한여름, 폭염"  # 12월은 연말 OK
+    else:  # 12, 1, 2
+        season = "겨울"
+        forbidden = "벚꽃, 단풍, 빙수, 한여름, 야외 테라스 추천, 폭염"
+    return now, season, forbidden
+
+
+def get_time_context_block():
+    """현재 월·계절·금지어 안내 블록"""
+    now, season, forbidden = _current_time_context()
+    return (
+        f"[현재 시점: {now.year}년 {now.month}월 ({season})]\n"
+        f"- 시기와 안 맞는 단어 절대 사용 금지: {forbidden}\n"
+        f"- 가게명·고유명사에 시즌 단어가 들어 있어도(예: '땡스투홀리데이') "
+        f"본문은 현재 시점({now.month}월·{season}) 톤으로만 작성.\n"
+    )
+
+
 READABILITY_GUIDELINES = """
 [가독성 절대 원칙 — Yoast SEO Readability 점수 향상]
 - **한 문장 60자 이내**. 길어지면 두 문장으로 나눠라. 쉼표로 길게 잇지 말 것.
@@ -2030,9 +2112,13 @@ def generate_post(kw, info, news_ctx=""):
     else:
         style_label, style_example = random.choice(TITLE_STYLES_GENERAL)
 
+    # 현재 시점 블록 — 모든 글 공통 (시기 부적절 표현 차단)
+    time_block = get_time_context_block()
+
     # 뉴스 컨텍스트 블록 (있으면 prompt에 강제 주입)
     if news_ctx:
         ctx_block = f"""
+{time_block}
 [**최신 뉴스 발췌 — 이 정보만 기반으로 작성. 이 안에 없는 사실은 만들지 말 것.**]
 {news_ctx}
 
@@ -2047,7 +2133,7 @@ def generate_post(kw, info, news_ctx=""):
 {READABILITY_GUIDELINES}
 """
     else:
-        ctx_block = READABILITY_GUIDELINES
+        ctx_block = f"{time_block}\n{READABILITY_GUIDELINES}"
 
     if cat == "sports":
         prompt = f"""너는 한국의 스포츠 가이드 블로거야. 키워드 "{kw}"로 모바일 최적화 글을 써줘.
@@ -2830,8 +2916,11 @@ def run_bot():
             log(f"   → 이미지 총 {len(images)}장 확보 (목표 {TOTAL_IMAGES}장)")
 
             if len(images) < 1:
-                # Picsum 폴백까지 실패한다는 건 네트워크 자체가 죽은 거
-                log("   ⛔ 이미지 0장 (네트워크 이상), 스킵")
+                log("   ⛔ 이미지 0장, 스킵")
+                continue
+            # 핫플/맛집은 가게 사진이 콘텐츠 핵심 — 최소 2장 보장
+            if info["category"] in ("hotspot", "restaurant") and len(images) < 2:
+                log(f"   ⛔ 핫플/맛집 이미지 {len(images)}장 < 2 (사진이 적어 글 신뢰도 ↓), 스킵")
                 continue
 
             # ⑤ 본문/제목 생성 (뉴스 컨텍스트 기반)
