@@ -32,7 +32,8 @@ DB_DATA_URL = (
 )
 
 # 1회 실행당 최대 발행 글 수 (중복 제외 후)
-MAX_POSTS_PER_RUN = 3
+# 풀 27개에서 필터 강화 후 통과율 ~20% 가정 → 회차당 5편 처리 가능
+MAX_POSTS_PER_RUN = 5
 
 # 글 1편당 총 이미지 수 (featured 1장 + 본문 N-1장)
 # 본문 350~500자 기준 3이 적정. 더 이미지 강조하려면 4, 더 글 위주면 2.
@@ -118,8 +119,8 @@ def get_google_trends():
             t = item.find("title")
             if t is not None and t.text:
                 keywords.append(t.text.strip())
-        # 후보 풀을 8개로 넉넉히 (중복 제외 후 MAX_POSTS_PER_RUN 만큼만 발행)
-        final = keywords[:8]
+        # 후보 풀을 16개로 — 필터 통과율 25% 가정 시 4편 확보 가능
+        final = keywords[:16]
         log(f"✅ 트렌드 키워드 {len(final)}개: {final}")
         return final
     except Exception as e:
@@ -368,16 +369,16 @@ def discover_trending_places_from_blogs(d_df, target=3):
 
 def build_keyword_pool(d_df):
     """
-    트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견
-    세 소스 합쳐서 풀 구성. 사용자 직접 입력 영역 0.
+    트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견.
+    풀을 충분히 크게 가져가서 강한 필터 통과 후에도 MAX_POSTS_PER_RUN 채우게.
     """
     pool = []
-    # 1) 구글 트렌드 RSS — 속보·연예·스포츠
+    # 1) 구글 트렌드 RSS 16개 — 속보·연예·스포츠
     pool.extend(get_google_trends())
-    # 2) 거지주차 DB 시드 — 인기 동네 × 다양한 접미사 (시즌·요일 보강)
-    pool.extend(get_seed_keywords_from_parking_db(d_df, n=3))
-    # 3) 네이버 블로그 트렌딩 — Gemini가 신상 가게 자동 발견
-    pool.extend(discover_trending_places_from_blogs(d_df, target=3))
+    # 2) 거지주차 DB 시드 6개 — 인기 동네 × 다양한 접미사 (시즌·요일 보강)
+    pool.extend(get_seed_keywords_from_parking_db(d_df, n=6))
+    # 3) 네이버 블로그 트렌딩 5개 — Gemini가 신상 가게 자동 발견
+    pool.extend(discover_trending_places_from_blogs(d_df, target=5))
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
