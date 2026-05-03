@@ -2897,6 +2897,127 @@ CATEGORY_TO_WP = {
 
 # 슬러그 → WP 카테고리 ID 캐시 (한 번 조회/생성한 건 메모리 캐시)
 _WP_CATEGORY_CACHE = {}
+# 태그 이름 → ID 캐시
+_WP_TAG_CACHE = {}
+
+# 카테고리별 기본 태그 (자동 첨가)
+CATEGORY_BASE_TAGS = {
+    "sports": ["스포츠", "이슈", "와이핫"],
+    "entertainment": ["연예", "방송", "이슈", "와이핫"],
+    "hotspot": ["핫플", "트렌드", "와이핫"],
+    "restaurant": ["맛집", "핫플", "와이핫"],
+}
+
+# 태그 추출에서 제외할 일반어
+_TAG_STOPWORDS = {
+    "이슈", "오늘", "이번", "이상", "지난", "최근",
+    "사진", "영상", "기사", "뉴스", "발표", "공개",
+    "한국", "전국", "관련", "내용", "그것", "이것",
+    "사람", "이번주", "지난주",
+}
+
+
+def extract_auto_tags(kw, news_items, category):
+    """
+    키워드 + 카테고리 기본 + 뉴스 제목에서 자주 등장하는 명사 추출.
+    Gemini 호출 X (휴리스틱). 최대 10개 반환.
+    """
+    tags = []
+    seen = set()
+
+    def _add(t):
+        t = (t or "").strip()
+        if not t or len(t) < 2:
+            return
+        if t in seen or t in _TAG_STOPWORDS:
+            return
+        seen.add(t)
+        tags.append(t)
+
+    # 1) 키워드 자체와 토큰
+    if kw:
+        _add(kw.strip())
+        for tok in re.split(r"\s+", kw.strip()):
+            if len(tok) >= 2:
+                _add(tok)
+
+    # 2) 카테고리 기본 태그
+    for t in CATEGORY_BASE_TAGS.get(category, ["이슈", "와이핫"]):
+        _add(t)
+
+    # 3) 뉴스 제목에서 빈도 높은 한글 명사 (2~5자)
+    if news_items:
+        from collections import Counter
+        blob = " ".join((it.get("title", "") + " " + it.get("desc", ""))
+                        for it in news_items[:6])
+        nouns = re.findall(r"[가-힣]{2,5}", blob)
+        for noun, count in Counter(nouns).most_common(20):
+            if count >= 2:
+                _add(noun)
+            if len(tags) >= 10:
+                break
+
+    return tags[:10]
+
+
+def get_or_create_wp_tag(name):
+    """WP 태그 이름 → ID. 없으면 자동 생성. 메모리 캐시."""
+    if not name:
+        return None
+    if name in _WP_TAG_CACHE:
+        return _WP_TAG_CACHE[name]
+    try:
+        # 같은 이름 검색
+        r = requests.get(
+            f"{WP_BASE}/tags",
+            params={"search": name, "per_page": 5},
+            auth=auth,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            for t in r.json():
+                if t.get("name") == name:
+                    tid = t["id"]
+                    _WP_TAG_CACHE[name] = tid
+                    return tid
+        # 새로 생성
+        rc = requests.post(
+            f"{WP_BASE}/tags",
+            auth=auth,
+            json={"name": name},
+            timeout=10,
+        )
+        if rc.status_code in (200, 201):
+            tid = rc.json().get("id")
+            _WP_TAG_CACHE[name] = tid
+            return tid
+        # 이미 존재 등 400 응답 → search로 다시 조회
+        if rc.status_code == 400:
+            r2 = requests.get(
+                f"{WP_BASE}/tags",
+                params={"search": name, "per_page": 10},
+                auth=auth,
+                timeout=10,
+            )
+            if r2.status_code == 200:
+                for t in r2.json():
+                    if t.get("name") == name:
+                        tid = t["id"]
+                        _WP_TAG_CACHE[name] = tid
+                        return tid
+    except Exception as e:
+        log(f"   WP 태그 처리 실패 '{name}': {str(e)[:60]}")
+    return None
+
+
+def resolve_tag_ids(tag_names):
+    """태그 이름 리스트 → ID 리스트 (실패 항목 자동 스킵)"""
+    ids = []
+    for name in tag_names:
+        tid = get_or_create_wp_tag(name.strip())
+        if tid:
+            ids.append(tid)
+    return ids
 
 
 def get_or_create_wp_category(slug, name):
@@ -2943,13 +3064,151 @@ def resolve_category_id(bot_category):
     return get_or_create_wp_category(slug, name)
 
 
-def post_to_wordpress(title, content, featured_id=None, category_ids=None):
+# --- [네이버 블로그 반자동 발행 — Gemini 윤색본 → GitHub 파일] ---
+NAVER_DRAFTS_DIR = "naver_drafts"
+
+CATEGORY_KR_MAP = {
+    "sports": "스포츠",
+    "entertainment": "연예·방송",
+    "hotspot": "핫플·맛집",
+    "restaurant": "핫플·맛집",
+    "general": "오늘의 이슈",
+}
+
+
+def rewrite_for_naver(orig_title, content_html, category, kw):
+    """
+    워드프레스 글을 네이버 블로그용으로 윤색.
+    - 제목 표현 다르게 (검색 페널티 회피)
+    - 첫 문단 강한 훅 (모바일 미리보기)
+    - 본문 평문화 (네이버는 H2 태그보다 줄바꿈 위주)
+    - 태그 10개 자동 생성
+    """
+    # HTML → 평문 정리
+    plain = re.sub(r"<figure[^>]*>.*?</figure>", "", content_html or "",
+                   flags=re.DOTALL | re.IGNORECASE)
+    plain = re.sub(r"<img[^>]*>", "", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n\n[\1]\n", plain,
+                   flags=re.DOTALL | re.IGNORECASE)
+    plain = re.sub(r"<[^>]+>", "", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
+
+    cat_kr = CATEGORY_KR_MAP.get(category, "오늘의 이슈")
+
+    prompt = f"""다음 워드프레스 글을 네이버 블로그용으로 재작성해.
+
+[원본 정보]
+제목: {orig_title}
+키워드: {kw}
+카테고리: {cat_kr}
+본문:
+{plain[:3000]}
+
+[네이버 블로그용 재작성 규칙 — 절대 어기지 말 것]
+1. 제목: 원본과 의미 동일하지만 표현 다르게. 키워드는 보존. 35자 이내.
+2. 첫 문단: 강한 한 줄 훅 (모바일 검색 미리보기에 노출됨)
+3. 본문: 같은 정보·톤. 표현만 다듬기 (워드프레스 본문 그대로 복사 금지)
+4. H2/마크다운 X. 평문 + 줄바꿈 위주.
+5. 본문 분량 400~700자.
+6. 마지막 줄에 시그니처 그대로 박기:
+   📍 자세한 글: whyhot.kr
+   🚗 주차 정보: 거지주차.com
+
+[태그 10개]
+- 고정 5개: 오늘의이슈, 트렌드, 화제, 실시간이슈, 와이핫
+- 가변 5개: 키워드와 직결되는 검색어 (인물명·프로그램명·지역명 등)
+
+[출력 형식 — 오직 JSON만]
+{{
+  "title": "네이버용 제목 (35자 이내)",
+  "body": "재작성된 본문 (줄바꿈 포함, 평문)",
+  "tags": ["오늘의이슈","트렌드","화제","실시간이슈","와이핫","가변1","가변2","가변3","가변4","가변5"]
+}}"""
+    try:
+        res = gemini_generate(prompt, label="naver-rewrite")
+        txt = (res.text or "").strip()
+        txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
+        m = re.search(r"\{.*\}", txt, re.DOTALL)
+        if m:
+            txt = m.group(0)
+        data = json.loads(txt)
+        title_n = (data.get("title") or orig_title)[:40]
+        body_n = (data.get("body") or "").strip()
+        tags = data.get("tags") or []
+        tags = [str(t).strip().lstrip("#") for t in tags if t][:10]
+        if not body_n:
+            return None
+        return {
+            "title": title_n,
+            "body": body_n,
+            "tags": tags,
+            "category": cat_kr,
+        }
+    except Exception as e:
+        log(f"   네이버 재작성 실패: {str(e)[:80]}")
+        return None
+
+
+def save_naver_draft(rewritten, kw, original_url=None):
+    """네이버 윤색본을 GitHub repo의 naver_drafts/ 폴더에 마크다운으로 저장"""
+    if not rewritten:
+        return None
+    try:
+        os.makedirs(NAVER_DRAFTS_DIR, exist_ok=True)
+        from datetime import datetime
+        ts_full = datetime.now().strftime("%Y-%m-%d-%H%M")
+        ts_human = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # 파일명에 한글·영문·숫자만, 길이 제한
+        slug = re.sub(r"[^가-힣A-Za-z0-9_\-]+", "-", kw.strip())[:40].strip("-")
+        if not slug:
+            slug = "post"
+        fname = f"{ts_full}_{slug}.md"
+        path = os.path.join(NAVER_DRAFTS_DIR, fname)
+
+        tags_str = " ".join(f"#{t}" for t in rewritten["tags"])
+
+        content = f"""# {rewritten['title']}
+
+**카테고리**: {rewritten['category']}
+**원본**: {original_url or '(미발행)'}
+**키워드**: {kw}
+**작성일**: {ts_human}
+
+---
+
+## 📋 복사용 — 본문
+
+{rewritten['body']}
+
+---
+
+## 🏷 복사용 — 태그 (네이버 태그 칸에 그대로 붙여넣기)
+
+{tags_str}
+
+---
+
+> 워드프레스 → 네이버 윤색본. 복사·붙여넣기 후 발행하세요.
+> 처리 후 이 파일 삭제 또는 done/ 폴더로 이동.
+"""
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        log(f"📝 네이버 드래프트 저장: {path}")
+        return path
+    except Exception as e:
+        log(f"   네이버 드래프트 저장 실패: {str(e)[:80]}")
+        return None
+
+
+def post_to_wordpress(title, content, featured_id=None, category_ids=None, tag_ids=None):
     status = "draft" if PUBLISH_AS_DRAFT else "publish"
     payload = {"title": title, "content": content, "status": status}
     if featured_id:
         payload["featured_media"] = featured_id
     if category_ids:
         payload["categories"] = category_ids
+    if tag_ids:
+        payload["tags"] = tag_ids
     return requests.post(f"{WP_BASE}/posts", auth=auth, json=payload, timeout=40)
 
 
@@ -3103,25 +3362,41 @@ def run_bot():
             # 모바일 래퍼(line-height/word-break/font-size)로 전체 감싸기
             full_html = wrap_post_for_mobile(intro_html + article_html + trailer)
 
-            # ⑦ 피처드 이미지 업로드 + 카테고리 매핑 + 발행
+            # ⑦ 피처드 이미지 업로드 + 카테고리 매핑 + 자동 태그 + 발행
             featured_id = upload_featured_image(images[0])
             if not featured_id:
                 log("   ⛔ 대표 이미지 업로드 실패 — 발행 스킵 (대표 이미지 무조건 보장)")
                 continue
             cat_id = resolve_category_id(info["category"])
             category_ids = [cat_id] if cat_id else None
+            # 자동 태그: 키워드 + 카테고리 기본 + 뉴스 명사
+            auto_tags = extract_auto_tags(kw, news_items, info["category"])
+            tag_ids = resolve_tag_ids(auto_tags) if auto_tags else None
             log(f"   🏷  WP 카테고리: {info['category']} → id={cat_id}")
+            log(f"   🏷  WP 태그: {auto_tags} → {len(tag_ids or [])}개 매핑")
             r = post_to_wordpress(
                 title, full_html,
                 featured_id=featured_id,
                 category_ids=category_ids,
+                tag_ids=tag_ids,
             )
             if r.status_code in (200, 201):
+                wp_post_id = r.json().get('id')
                 state = "draft 저장" if PUBLISH_AS_DRAFT else "발행 완료"
-                log(f"🎉 [{kw}] {state} (id={r.json().get('id')})")
+                log(f"🎉 [{kw}] {state} (id={wp_post_id})")
                 posted_count += 1
-                # within-run 중복 차단: 같은 회차 안에서 비슷한 키워드가 또 들어오면 스킵
+                # within-run 중복 차단
                 recent_titles.insert(0, title)
+                # 네이버 블로그용 윤색본 자동 생성·저장
+                try:
+                    post_url = f"https://whyhot.kr/?p={wp_post_id}"
+                    rewritten = rewrite_for_naver(
+                        title, full_html, info["category"], kw,
+                    )
+                    if rewritten:
+                        save_naver_draft(rewritten, kw, post_url)
+                except Exception as e:
+                    log(f"   네이버 드래프트 생성 예외: {str(e)[:80]}")
             else:
                 log(f"❌ [{kw}] 발행 실패 {r.status_code}: {r.text[:200]}")
 
