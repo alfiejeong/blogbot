@@ -41,10 +41,10 @@ TOTAL_IMAGES = 3
 # 워드프레스 테마가 단일 글 상단에 featured 이미지를 자동 렌더하는지 여부.
 # True (기본·대부분 테마): 본문 상단 hero 생략 → theme이 featured로 렌더 → 중복 방지
 # False: 테마가 featured 자동 표시 안 할 때만 → 본문 상단에 hero 직접 삽입
-# 본문 상단에 hero 이미지를 명시적으로 박는다 (대표 이미지 무조건 노출 보장).
-# 테마가 featured_media를 자동 노출하지 않는 케이스에 대비.
-# featured_media도 그대로 업로드 (검색결과 썸네일·OG·소셜 미리보기용).
-THEME_AUTO_FEATURED_IMAGE = False
+# 대표 이미지(featured_media)는 워드프레스 테마가 글 상단에 자동 노출.
+# 본문 H2 사이에는 hero 외의 이미지(images[1:])만 분배 → 대표·본문 이미지 중복 방지.
+# 사용자 정책: 대표 이미지 ≠ 본문 이미지.
+THEME_AUTO_FEATURED_IMAGE = True
 
 # 무관한 stock photo 사고 차단 — Unsplash·Pexels·Picsum 전면 비활성.
 # 사용자 정책: stock photo가 글의 신뢰도를 깎는다. 진짜 사진만 쓴다.
@@ -499,6 +499,42 @@ NEWS_CONTEXT_NONFIT_TERMS = [
     # 정치·논란성
     "이혼 소송", "친자 확인",
 ]
+
+
+def detect_homonym_keyword(kw, news_items):
+    """
+    동명이인 모호 키워드 감지. 여러 다른 분야의 사람들이 같은 이름으로 등장하면 True.
+    예: '이수진' (배우 + 정치인 + 운동선수 등 여러 명) → 이런 키워드는 묶음 글로 잘못 풀리니 SKIP.
+    """
+    if not news_items or len(news_items) < 4:
+        return False
+    if not kw or not kw.strip():
+        return False
+    # 키워드가 한국 인명 후보(2~4자 한글)일 때만 검사
+    s = kw.strip()
+    if not re.match(r"^[가-힣]{2,4}$", s):
+        return False
+    # 뉴스 제목·요약에서 분야별 단서 추출
+    field_signals = {
+        "연예": ["배우", "가수", "아이돌", "예능", "드라마", "팬미팅", "콘서트", "MC"],
+        "스포츠": ["선수", "감독", "리그", "구단", "타격", "이닝", "골", "득점", "MVP"],
+        "정치": ["의원", "장관", "당대표", "대통령", "총리", "후보", "공천"],
+        "기업": ["대표", "CEO", "회장", "사장", "임원"],
+        "방송": ["아나운서", "기자"],
+        "법조": ["변호사", "판사", "검사"],
+    }
+    fields_seen = set()
+    blob = " ".join(
+        (it.get("title", "") + " " + it.get("desc", "")) for it in news_items[:8]
+    )
+    for field, hints in field_signals.items():
+        if any(h in blob for h in hints):
+            fields_seen.add(field)
+    # 서로 다른 분야가 2개 이상 → 동명이인 모호 키워드
+    if len(fields_seen) >= 2:
+        log(f"   ⚠️ 동명이인 감지 ({len(fields_seen)}개 분야: {fields_seen})")
+        return True
+    return False
 
 
 def is_nonfit_news_context(news_ctx):
@@ -1366,7 +1402,25 @@ MANAGEMENT_COMPANY_HINTS = [
     "협회", "연맹", "연합회", "조합", "재단", "위원회", "체육회",
     "구단", "프로팀", "선수단",
     "BWF", "FIFA", "UEFA", "AFC", "FIBA", "NBA", "NFL", "MLB", "KBO", "KBL",
+    # 지자체·정부기관 (관광지·축제 등 보도자료 사진)
+    "시청", "도청", "구청", "군청",
+    "관광공사", "관광재단", "문화재단",
+    "관광청", "문화체육관광부",
 ]
+
+
+# 지자체 접미사 — '○○시', '○○도', '○○군', '○○구'가 캡션에 있으면 정부기관 제공 가능성
+def _is_government_org(name):
+    """지자체·공공기관 패턴 매칭"""
+    if not name:
+        return False
+    n = name.strip()
+    # ○○시/○○도/○○군 등
+    if re.search(r"^[가-힣]{2,4}(특별시|광역시|시|도|군|구)$", n):
+        return True
+    if re.search(r"(공사|공단|재단|관광청|관광공사|시청|도청|구청|군청)$", n):
+        return True
+    return False
 
 
 def caption_priority_score(caption):
@@ -1416,6 +1470,13 @@ def is_management_company_caption(caption):
     for hint in MANAGEMENT_COMPANY_HINTS:
         if hint in caption:
             return True
+    # 지자체 패턴: '순천시 제공', '서울특별시 제공', '경기도 제공' 등
+    m = re.search(r"([가-힣]{2,5}(?:특별시|광역시|시|도|군|구))\s*제공", caption)
+    if m:
+        return True
+    m = re.search(r"사진\s*=\s*([가-힣]{2,5}(?:특별시|광역시|시|도|군|구))", caption)
+    if m:
+        return True
     return False
 
 
@@ -1787,12 +1848,13 @@ def verify_image_with_vision(image_url, kw, category):
         if not ctype.startswith("image/"):
             ctype = "image/jpeg"
         prompt = (
-            f"이 사진이 한국 트렌드 콘텐츠 키워드 '{kw}' "
-            f"(카테고리: {category})와 직접 관련 있는가?\n"
-            "1~3 = 무관 (다른 사람·장소·풍경 등)\n"
-            "4~6 = 약하게 연관 (같은 카테고리지만 키워드 직접 매칭 X)\n"
-            "7~10 = 명확히 매칭 (키워드의 인물·팀·장소·상품)\n"
-            "오직 숫자 하나만 답해. 다른 설명 절대 X."
+            f"이 사진을 두 항목으로 평가해. 한국 트렌드 키워드 '{kw}' (카테고리 {category}).\n"
+            "1) score: 키워드와 직접 관련도. 1=무관, 4-6=약함, 7-10=명확 매칭\n"
+            "2) watermark: 매체명·뉴스사 로고·기자명 워터마크가 사진 위에 박혀 있나? "
+            "(예: '연합뉴스', 'OSEN', '뉴시스', 매체 영문 약자 등이 사진 모서리에 텍스트로). "
+            "yes 또는 no.\n"
+            "JSON으로만 답: {\"score\": 숫자, \"watermark\": \"yes\"/\"no\"} "
+            "다른 설명 절대 X."
         )
         from google.genai import types
         res = gemini_generate(
@@ -1803,11 +1865,31 @@ def verify_image_with_vision(image_url, kw, category):
             label="vision",
         )
         txt = (res.text or "").strip()
-        m = re.search(r"\d+", txt)
-        if not m:
-            return None
-        score = int(m.group(0))
-        return min(max(score, 1), 10)
+        # JSON 파싱 우선
+        score = None
+        watermark = "no"
+        try:
+            import json as _json
+            cleaned = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
+            jm = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if jm:
+                obj = _json.loads(jm.group(0))
+                score = int(obj.get("score", 0))
+                watermark = str(obj.get("watermark", "no")).lower()
+        except Exception:
+            pass
+        # JSON 실패 시 첫 숫자만 점수로 사용 (호환)
+        if score is None:
+            m = re.search(r"\d+", txt)
+            if not m:
+                return None
+            score = int(m.group(0))
+        score = min(max(score, 1), 10)
+        # 워터마크 박힌 사진은 무조건 거부 (점수와 무관)
+        if watermark == "yes":
+            log(f"   ✗ Vision 워터마크 감지 → 거부 (점수 {score}/10이어도 차단)")
+            return 0
+        return score
     except Exception as e:
         log(f"   Vision 검증 예외: {str(e)[:80]}")
         return None
@@ -2729,30 +2811,33 @@ def sanitize_gemini_html(html):
     return html
 
 
-def distribute_images(html, body_images):
+def distribute_images(html, body_images, hero_url=None):
     """
-    본문 사진을 H2 직후에 배치. 단, 첫 H2(=hero 바로 밑)는 건너뛰어
-    도입부에 사진 두 장이 연달아 붙는 걸 방지.
+    본문 사진을 H2 직후에 배치. hero_url이 주어지면 같은 URL은 본문에 박지 않아
+    대표 이미지와 본문 이미지 중복 방지.
     """
     html = sanitize_gemini_html(html)
+
+    # hero와 같은 URL이 body에 들어 있으면 제거 (대표·본문 중복 차단)
+    if hero_url and body_images:
+        body_images = [
+            b for b in body_images if b.get("url") != hero_url
+        ]
 
     if not body_images:
         return html
 
     h2_ends = [m.end() for m in re.finditer(r"</h2>", html, flags=re.IGNORECASE)]
     if not h2_ends:
-        # H2가 아예 없으면 마지막에만 1장 붙임 (안전망)
         return html + "\n" + render_figure(body_images[0])
 
-    # 첫 H2는 hero와 너무 가까우니 후보에서 제외
-    candidates = h2_ends[1:] if len(h2_ends) > 1 else h2_ends
+    # 모든 H2를 후보로 (테마가 featured를 자동 표시하므로 첫 H2도 박을 수 있음)
+    candidates = h2_ends
 
-    # body_images 개수만큼 candidates 안에서 균등 분포
     n = min(len(body_images), len(candidates))
     indices = [int((i + 0.5) * len(candidates) / n) for i in range(n)]
     chosen = [(candidates[i], body_images[k]) for k, i in enumerate(indices)]
 
-    # 뒤에서부터 삽입(앞 인덱스가 안 밀림)
     chosen.sort(key=lambda x: -x[0])
     out = html
     for pos, img in chosen:
@@ -2934,6 +3019,11 @@ def run_bot():
                 log("   ⏭️  뉴스 맥락이 사건사고/금융 분쟁 → 안전상 스킵")
                 continue
 
+            # ③-C 동명이인 모호 키워드 감지 (이수진·이시형처럼 여러 분야 인물)
+            if detect_homonym_keyword(kw, news_items):
+                log("   ⏭️  동명이인 모호 키워드 → AI 묶음 글 방지, 스킵")
+                continue
+
             # ②-B 분류가 SKIP이면 뉴스 본문으로 한 번 더 보정 시도
             if info["category"] not in ALLOWED_CATEGORIES:
                 cat_from_news = classify_by_news_context(news_items, kw)
@@ -2993,7 +3083,7 @@ def run_bot():
             #   - 이미지 1장만 있으면 인트로용으로만 쓰고 본문 [IMG] 토큰은 빈 문자열로 정리
             hero_img = images[0]
             body_imgs = images[1:] if len(images) > 1 else []
-            article_html = distribute_images(article_html, body_imgs)
+            article_html = distribute_images(article_html, body_imgs, hero_url=hero_img.get("url"))
             # Yoast Readability 향상: 수동태→능동태, 긴 문장 분할, 경고
             article_html = improve_readability(article_html)
             # 모바일 가독성: 한 <p>에 여러 문장이 붙어 있으면 분리
