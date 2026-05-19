@@ -1033,6 +1033,7 @@ def get_wikipedia_image(kw):
                 f'출처: <a href="{page_url}" rel="nofollow">한국어 위키백과</a> '
                 f'(CC BY-SA)'
             ),
+            "source": "wikipedia",  # 출처 신뢰도 검사용
         }]
     except Exception as e:
         log(f"Wikipedia 실패: {e}")
@@ -1102,6 +1103,7 @@ def get_wikimedia_search(query, n=2):
                     "url": src,
                     "alt": query,
                     "credit": f"이미지: {artist_short} · Wikimedia Commons ({lic})",
+                    "source": "wikimedia",  # 출처 신뢰도 검사용
                 })
         return out
     except Exception as e:
@@ -3087,13 +3089,14 @@ CATEGORY_KR_MAP = {
 }
 
 
-def rewrite_for_naver(orig_title, content_html, category, kw):
+def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
     """
     워드프레스 글을 네이버 블로그용으로 윤색.
     - 제목 표현 다르게 (검색 페널티 회피)
     - 첫 문단 강한 훅 (모바일 미리보기)
     - 본문 평문화 (네이버는 H2 태그보다 줄바꿈 위주)
     - 태그 10개 자동 생성
+    - 외부 이미지 URL을 결과에 같이 묶어서 반환 (저장 없이 URL 첨부)
     """
     # HTML → 평문 정리
     plain = re.sub(r"<figure[^>]*>.*?</figure>", "", content_html or "",
@@ -3121,9 +3124,9 @@ def rewrite_for_naver(orig_title, content_html, category, kw):
 3. 본문: 같은 정보·톤. 표현만 다듬기 (워드프레스 본문 그대로 복사 금지)
 4. H2/마크다운 X. 평문 + 줄바꿈 위주.
 5. 본문 분량 400~700자.
-6. 마지막 줄에 시그니처 그대로 박기:
-   📍 자세한 글: whyhot.kr
-   🚗 주차 정보: 거지주차.com
+6. 마지막 줄에 시그니처 그대로 박기 (반드시 https:// 포함, 네이버 자동 링크 깨짐 방지):
+   📍 자세한 글: https://whyhot.kr
+   🚗 주차 정보가 필요하면 거지주차닷컴 검색
 
 [태그 10개]
 - 고정 5개: 오늘의이슈, 트렌드, 화제, 실시간이슈, 와이핫
@@ -3149,11 +3152,19 @@ def rewrite_for_naver(orig_title, content_html, category, kw):
         tags = [str(t).strip().lstrip("#") for t in tags if t][:10]
         if not body_n:
             return None
+        # 이미지 URL 모음 (외부 직링크 첨부용)
+        img_urls = []
+        if images:
+            for im in images:
+                u = im.get("url")
+                if u and u not in img_urls:
+                    img_urls.append(u)
         return {
             "title": title_n,
             "body": body_n,
             "tags": tags,
             "category": cat_kr,
+            "image_urls": img_urls,
         }
     except Exception as e:
         log(f"   네이버 재작성 실패: {str(e)[:80]}")
@@ -3161,7 +3172,12 @@ def rewrite_for_naver(orig_title, content_html, category, kw):
 
 
 def save_naver_draft(rewritten, kw, original_url=None):
-    """네이버 윤색본을 GitHub repo의 naver_drafts/ 폴더에 마크다운으로 저장"""
+    """
+    네이버 윤색본을 두 형식으로 저장:
+    1) .md 파일 — GitHub 모바일 앱에서 보기·복사용 (참고용 정리본)
+    2) .html 파일 — 모바일 브라우저에서 한 방 select-all → copy → 네이버 글쓰기 본문에 그대로 붙여넣기
+       (이미지가 외부 URL <img>로 박혀 있어서 네이버 에디터가 그대로 인식)
+    """
     if not rewritten:
         return None
     try:
@@ -3169,16 +3185,27 @@ def save_naver_draft(rewritten, kw, original_url=None):
         from datetime import datetime
         ts_full = datetime.now().strftime("%Y-%m-%d-%H%M")
         ts_human = datetime.now().strftime("%Y-%m-%d %H:%M")
-        # 파일명에 한글·영문·숫자만, 길이 제한
         slug = re.sub(r"[^가-힣A-Za-z0-9_\-]+", "-", kw.strip())[:40].strip("-")
         if not slug:
             slug = "post"
-        fname = f"{ts_full}_{slug}.md"
-        path = os.path.join(NAVER_DRAFTS_DIR, fname)
 
         tags_str = " ".join(f"#{t}" for t in rewritten["tags"])
+        image_urls = rewritten.get("image_urls", []) or []
 
-        content = f"""# {rewritten['title']}
+        # ── 1) .md 파일 (참고·복사 가이드용)
+        md_path = os.path.join(NAVER_DRAFTS_DIR, f"{ts_full}_{slug}.md")
+        images_list_md = ""
+        if image_urls:
+            lines = "\n".join(f"{i+1}. {u}" for i, u in enumerate(image_urls))
+            images_list_md = f"""
+---
+
+## 🖼 외부 이미지 URL (네이버 글쓰기 → 사진 → 'URL로 추가'에 붙여넣기, 또는 아래 HTML 파일에서 통째 복사하면 자동 첨부)
+
+{lines}
+"""
+
+        md_content = f"""# {rewritten['title']}
 
 **카테고리**: {rewritten['category']}
 **원본**: {original_url or '(미발행)'}
@@ -3187,25 +3214,187 @@ def save_naver_draft(rewritten, kw, original_url=None):
 
 ---
 
-## 📋 복사용 — 본문
+## 📋 본문 (텍스트 전용)
 
 {rewritten['body']}
 
+{images_list_md}
 ---
 
-## 🏷 복사용 — 태그 (네이버 태그 칸에 그대로 붙여넣기)
+## 🏷 태그 (네이버 태그 칸에 그대로 붙여넣기)
 
 {tags_str}
 
 ---
 
-> 워드프레스 → 네이버 윤색본. 복사·붙여넣기 후 발행하세요.
-> 처리 후 이 파일 삭제 또는 done/ 폴더로 이동.
+## 🚀 빠른 발행 가이드
+
+**모바일에서**:
+1. 같은 폴더의 `{ts_full}_{slug}.html` 파일 열기 (브라우저에서)
+2. **전체 선택 (꾸욱 누르기 → 모두 선택)** → **복사**
+3. 네이버 블로그 앱 → 글쓰기
+4. 제목 칸: 위 `# {rewritten['title']}` 부분 복사·붙여넣기
+5. 본문 칸: 2번에서 복사한 거 붙여넣기 (이미지 자동 첨부됨)
+6. 태그 칸: 위 태그 복사·붙여넣기
+7. 카테고리: **{rewritten['category']}**
+8. **발행** 끝
+
+처리 후 이 파일 + .html 파일 삭제.
 """
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-        log(f"📝 네이버 드래프트 저장: {path}")
-        return path
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+
+        # ── 2) .html 파일 (한 탭 복사 버튼 + 이미지 인라인 첨부)
+        html_path = os.path.join(NAVER_DRAFTS_DIR, f"{ts_full}_{slug}.html")
+        # 본문 줄바꿈 → <p>로 변환 + 이미지 균등 분배
+        paragraphs = [p.strip() for p in rewritten['body'].split("\n") if p.strip()]
+        # 본문 문단 사이에 이미지 분배 (자연스러운 위치)
+        body_parts = []
+        n_paras = len(paragraphs)
+        n_imgs = len(image_urls)
+        # 이미지를 문단 2개마다 한 장씩 끼워넣기
+        img_idx = 0
+        for i, p in enumerate(paragraphs):
+            body_parts.append(f"<p>{p}</p>")
+            # 매 2문단마다 이미지 한 장 (가능한 만큼)
+            if (i + 1) % 2 == 0 and img_idx < n_imgs:
+                u = image_urls[img_idx]
+                body_parts.append(
+                    f'<p><img src="{u}" '
+                    f'style="max-width:100%;height:auto;display:block;margin:14px auto;" '
+                    f'alt="{rewritten["title"]}"></p>'
+                )
+                img_idx += 1
+        # 남은 이미지가 있으면 본문 끝에 첨부
+        while img_idx < n_imgs:
+            u = image_urls[img_idx]
+            body_parts.append(
+                f'<p><img src="{u}" '
+                f'style="max-width:100%;height:auto;display:block;margin:14px auto;" '
+                f'alt="{rewritten["title"]}"></p>'
+            )
+            img_idx += 1
+        full_body_html = "\n".join(body_parts)
+
+        # 클립보드 복사용 데이터 (JS에서 쓸 수 있게 escape)
+        import html as _html_esc
+        title_safe = _html_esc.escape(rewritten['title'], quote=True)
+        # body는 HTML로 클립보드 쓸 거라 raw 보존, 단 script 안에 들어갈 거니 </script> 차단
+        body_for_js = full_body_html.replace("</script>", "<\\/script>")
+        tags_safe = _html_esc.escape(tags_str, quote=True)
+
+        html_content = f"""<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title_safe}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', sans-serif;
+         max-width: 720px; margin: 0 auto; padding: 16px; line-height: 1.7;
+         color: #222; word-break: keep-all; }}
+  h1 {{ font-size: 22px; margin-top: 28px; }}
+  p {{ font-size: 16px; }}
+  .actions {{ position: sticky; top: 0; background: #fff;
+              padding: 12px 0; border-bottom: 1px solid #eee; z-index: 10; }}
+  .btn {{ display: block; width: 100%; padding: 16px; margin: 8px 0;
+          border: 0; border-radius: 12px; font-size: 16px; font-weight: 600;
+          cursor: pointer; text-align: center; text-decoration: none; }}
+  .btn-title {{ background: #4a90e2; color: #fff; }}
+  .btn-body {{ background: #ff5722; color: #fff; }}
+  .btn-tags {{ background: #ffa726; color: #fff; }}
+  .btn-naver {{ background: #03c75a; color: #fff; }}
+  .btn.copied {{ background: #2ecc71 !important; }}
+  .meta {{ background:#f6f6f6; padding:10px; border-radius:8px;
+           font-size:13px; color:#666; margin-top: 20px; }}
+  .tags-box {{ margin-top:18px; padding:14px; background:#fff5e6;
+               border-radius:8px; font-size:14px; }}
+  .preview-title {{ background:#eef5ff; padding:12px; border-radius:8px;
+                    margin: 12px 0; font-weight: 700; }}
+  .help {{ background:#e8f4ff; padding:12px; border-radius:8px;
+           font-size:13px; margin-bottom:14px; line-height: 1.6; }}
+</style></head><body>
+
+<div class="help">
+✅ <b>이렇게 쓰세요</b><br>
+1. <b>본문 복사</b> 탭 → 네이버 글쓰기 본문에 붙여넣기 (이미지 자동 첨부)<br>
+2. <b>제목 복사</b> 탭 → 네이버 제목 칸에 붙여넣기<br>
+3. <b>태그 복사</b> 탭 → 네이버 태그 칸에 붙여넣기<br>
+4. 카테고리: <b>{rewritten['category']}</b> 선택 후 발행
+</div>
+
+<div class="actions">
+  <button class="btn btn-body" onclick="copyBodyHTML(this)">📋 본문 복사 (이미지 포함)</button>
+  <button class="btn btn-title" onclick="copyTextFromId(this, 'data-title')">📌 제목 복사</button>
+  <button class="btn btn-tags" onclick="copyTextFromId(this, 'data-tags')">🏷 태그 복사</button>
+  <a class="btn btn-naver" href="https://blog.naver.com/whyhotmagazine?Redirect=Write" target="_blank">🚀 네이버 블로그 글쓰기 열기</a>
+</div>
+
+<div class="preview-title">제목: <span id="data-title">{title_safe}</span></div>
+
+<div id="data-body">
+{full_body_html}
+</div>
+
+<div class="tags-box">
+<b>태그</b>: <span id="data-tags">{tags_safe}</span>
+</div>
+
+<div class="meta">
+카테고리: {rewritten['category']} · 원본: {original_url or '(미발행)'} · {ts_human}
+</div>
+
+<script>
+const BODY_HTML = {repr(body_for_js)};
+const BODY_PLAIN = document.getElementById('data-body').innerText;
+
+async function copyBodyHTML(btn) {{
+  const html = BODY_HTML;
+  const text = BODY_PLAIN;
+  const original = btn.textContent;
+  try {{
+    if (navigator.clipboard && window.ClipboardItem) {{
+      const data = [new ClipboardItem({{
+        'text/html': new Blob([html], {{type: 'text/html'}}),
+        'text/plain': new Blob([text], {{type: 'text/plain'}})
+      }})];
+      await navigator.clipboard.write(data);
+    }} else {{
+      await navigator.clipboard.writeText(text);
+    }}
+    btn.textContent = '✓ 복사됨! 네이버 본문에 붙여넣기';
+    btn.classList.add('copied');
+    setTimeout(() => {{
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }}, 3000);
+  }} catch (e) {{
+    alert('복사 실패: ' + e.message + '\\n수동으로 본문 영역을 길게 눌러 복사하세요.');
+  }}
+}}
+
+async function copyTextFromId(btn, id) {{
+  const text = document.getElementById(id).textContent;
+  const original = btn.textContent;
+  try {{
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✓ 복사됨!';
+    btn.classList.add('copied');
+    setTimeout(() => {{
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }}, 2000);
+  }} catch (e) {{
+    alert('복사 실패: ' + e.message);
+  }}
+}}
+</script>
+
+</body></html>"""
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+        log(f"📝 네이버 드래프트 저장: {md_path} (+.html)")
+        return md_path
     except Exception as e:
         log(f"   네이버 드래프트 저장 실패: {str(e)[:80]}")
         return None
@@ -3403,6 +3592,7 @@ def run_bot():
                     post_url = f"https://whyhot.kr/?p={wp_post_id}"
                     rewritten = rewrite_for_naver(
                         title, full_html, info["category"], kw,
+                        images=images,  # 외부 이미지 URL을 그대로 네이버 드래프트에 박기
                     )
                     if rewritten:
                         save_naver_draft(rewritten, kw, post_url)
