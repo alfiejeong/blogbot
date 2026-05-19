@@ -1906,16 +1906,25 @@ def filter_images_by_vision(pool, kw, category):
     threshold = get_vision_threshold(category)
     log(f"   🔍 Vision 검증: {len(pool)}장 (임계값 {threshold}/10, 카테고리={category})")
     accepted = []
+    # 출처별 신뢰도 — Vision 실패 시 통과 여부 결정
+    # 강한 출처: 캡션·OG 등으로 이미 검증됨 → Vision 실패해도 통과
+    # 약한 출처: 일반 검색 결과 → Vision 실패 시 거부 (무관 이미지 위험)
+    STRONG_SOURCES = {"press", "naver_local_og", "blog_og"}
     for img in pool:
         url = img.get("url", "")
+        source = img.get("source", "unknown")
         if "picsum.photos" in url:
             accepted.append(img)
             continue
         score = verify_image_with_vision(url, kw, category)
         credit_short = (img.get("credit", "") or "")[:40]
         if score is None:
-            accepted.append(img)
-            log(f"   ⚠️ Vision 실패, 통과: {credit_short}")
+            # Vision 실패 — 출처 신뢰도로 결정
+            if source in STRONG_SOURCES:
+                accepted.append(img)
+                log(f"   ⚠️ Vision 실패, 강한 출처({source})라 통과: {credit_short}")
+            else:
+                log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
         elif score >= threshold:
             accepted.append(img)
             log(f"   ✓ Vision OK ({score}/10): {credit_short}")
@@ -2010,13 +2019,15 @@ def collect_images(queries, kw, category, target=5, news_items=None,
                 add(get_pexels(q, n=2))
             log(f"   [tier2 추상쿼리] {len(pool)}장")
 
-    # Tier 3: 한국어 위키백과 (키워드 직접)
-    if len(pool) < target:
+    # Tier 3: 한국어 위키백과 (키워드 직접) — 핫플/맛집은 X
+    # (한국 가게는 위키백과에 거의 없고, 검색 결과가 무관해질 위험)
+    if not is_place and len(pool) < target:
         add(get_wikipedia_image(kw))
         log(f"   [tier3 위키백과] {len(pool)}장")
 
-    # Tier 4: Wikimedia Commons 검색
-    if len(pool) < target:
+    # Tier 4: Wikimedia Commons 검색 — 핫플/맛집은 X
+    # (Wikimedia는 글로벌 일반 사진이 많아 한국 가게·핫플과 거의 무관)
+    if not is_place and len(pool) < target:
         seeds_q = [kw] + list(queries[:2])
         for q in seeds_q:
             if len(pool) >= target:
