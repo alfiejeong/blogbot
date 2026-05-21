@@ -1861,10 +1861,11 @@ VISION_VERIFY_ENABLED = (
     not in {"1", "true", "yes"}
 )
 VISION_VERIFY_THRESHOLD = 6  # 기본 임계값 (인물·sports·entertainment)
-# 카테고리별 임계값 — 핫플/맛집은 실제 가게 사진이 핵심이라 더 빡세게
+# 카테고리별 임계값 — 핫플/맛집은 실제 가게 사진이 핵심이지만 너무 빡세면 통과율 ↓
+# (정두릅 결정 2026-05: 7→6 완화. 경계 케이스 통과시켜 발행률 올림)
 VISION_THRESHOLDS_BY_CATEGORY = {
-    "hotspot": 7,
-    "restaurant": 7,
+    "hotspot": 6,
+    "restaurant": 6,
     "entertainment": 6,
     "sports": 6,
 }
@@ -3801,9 +3802,10 @@ def run_bot():
             if len(images) < 1:
                 log("   ⛔ 이미지 0장, 스킵")
                 continue
-            # 핫플/맛집은 가게 사진이 콘텐츠 핵심 — 최소 2장 보장
-            if info["category"] in ("hotspot", "restaurant") and len(images) < 2:
-                log(f"   ⛔ 핫플/맛집 이미지 {len(images)}장 < 2 (사진이 적어 글 신뢰도 ↓), 스킵")
+            # 핫플/맛집은 가게 사진이 콘텐츠 핵심 — 최소 1장 보장
+            # (정두릅 결정 2026-05: 2→1 완화. hero 1장만 있어도 발행 허용해 발행률 올림)
+            if info["category"] in ("hotspot", "restaurant") and len(images) < 1:
+                log(f"   ⛔ 핫플/맛집 이미지 {len(images)}장 < 1, 스킵")
                 continue
 
             # ⑤ 본문/제목 생성 (뉴스 컨텍스트 기반)
