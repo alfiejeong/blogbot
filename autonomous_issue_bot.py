@@ -2871,14 +2871,47 @@ def distribute_images(html, body_images, hero_url=None):
     """
     본문 사진을 H2 직후에 배치. hero_url이 주어지면 같은 URL은 본문에 박지 않아
     대표 이미지와 본문 이미지 중복 방지.
+    또한 body_images 내부 중복도 차단:
+      - 같은 URL (동일 출처 두 번 수집 케이스)
+      - WP 재업로드로 -1, -2 등 숫자 접미사만 다른 파일명 (같은 사진 두 번 업로드된 케이스)
+      - 쿼리스트링/해시만 다른 동일 경로
     """
     html = sanitize_gemini_html(html)
 
-    # hero와 같은 URL이 body에 들어 있으면 제거 (대표·본문 중복 차단)
-    if hero_url and body_images:
-        body_images = [
-            b for b in body_images if b.get("url") != hero_url
-        ]
+    from urllib.parse import urlparse
+
+    def _basename_norm(u):
+        try:
+            path = urlparse(u).path
+            bn = path.rsplit("/", 1)[-1].lower()
+        except Exception:
+            return ""
+        # WP가 같은 파일 재업로드 시 자동 부여하는 -1, -2 등 숫자 접미사 정규화
+        bn = re.sub(r"-\d+(?=\.[a-z0-9]+$)", "", bn)
+        return bn
+
+    seen_urls = set()
+    seen_basenames = set()
+    if hero_url:
+        seen_urls.add(hero_url)
+        hb = _basename_norm(hero_url)
+        if hb:
+            seen_basenames.add(hb)
+
+    deduped = []
+    for b in (body_images or []):
+        u = b.get("url")
+        if not u or u in seen_urls:
+            continue
+        bn = _basename_norm(u)
+        if bn and bn in seen_basenames:
+            log(f"   🪞 본문 이미지 중복 차단: {bn}")
+            continue
+        seen_urls.add(u)
+        if bn:
+            seen_basenames.add(bn)
+        deduped.append(b)
+    body_images = deduped
 
     if not body_images:
         return html
@@ -3325,7 +3358,28 @@ def save_naver_draft(rewritten, kw, original_url=None):
             slug = "post"
 
         tags_str = " ".join(f"#{t}" for t in rewritten["tags"])
-        image_urls = rewritten.get("image_urls", []) or []
+
+        # 이미지 중복 차단: URL 기준 + WP 재업로드로 -1/-2 접미사만 다른 파일명까지 정규화
+        def _img_basename_norm(u):
+            try:
+                from urllib.parse import urlparse
+                bn = urlparse(u).path.rsplit("/", 1)[-1].lower()
+                return re.sub(r"-\d+(?=\.[a-z0-9]+$)", "", bn)
+            except Exception:
+                return ""
+
+        _seen_u, _seen_b, _deduped = set(), set(), []
+        for _u in (rewritten.get("image_urls", []) or []):
+            if not _u or _u in _seen_u:
+                continue
+            _bn = _img_basename_norm(_u)
+            if _bn and _bn in _seen_b:
+                continue
+            _seen_u.add(_u)
+            if _bn:
+                _seen_b.add(_bn)
+            _deduped.append(_u)
+        image_urls = _deduped
 
         # ── 1) .md 파일 (참고·복사 가이드용)
         md_path = os.path.join(NAVER_DRAFTS_DIR, f"{ts_full}_{slug}.md")
@@ -3464,6 +3518,28 @@ def save_naver_draft(rewritten, kw, original_url=None):
             img_idx += 1
         full_body_html = "\n".join(body_parts)
 
+        # 모바일용 이미지 저장 섹션 (네이버 앱은 외부 URL <img> 인식 불가 → 길게 눌러 저장 후 첨부)
+        if image_urls:
+            _bank_items = []
+            _n_imgs = len(image_urls)
+            for _i, _u in enumerate(image_urls):
+                _bank_items.append(
+                    f'<div class="bank-item">'
+                    f'<div class="bank-num">{_i+1} / {_n_imgs} · 꾸욱 눌러 저장</div>'
+                    f'<img src="{_u}" alt="{rewritten["title"]}">'
+                    f'</div>'
+                )
+            img_bank_html = (
+                '<div class="img-bank">'
+                '<h3 class="bank-h3">📥 모바일용 이미지 (꾸욱 눌러 저장)</h3>'
+                '<p class="bank-desc">네이버 블로그 앱은 외부 URL 이미지를 인식하지 못합니다. '
+                '본문 복사·붙여넣기 후 아래 사진을 길게 눌러 저장한 다음, 네이버 앱의 사진 첨부에서 갤러리로 첨부하세요.</p>'
+                + "\n".join(_bank_items) +
+                '</div>'
+            )
+        else:
+            img_bank_html = ""
+
         # 클립보드 복사용 데이터 (JS에서 쓸 수 있게 escape)
         import html as _html_esc
         title_safe = _html_esc.escape(rewritten['title'], quote=True)
@@ -3500,14 +3576,25 @@ def save_naver_draft(rewritten, kw, original_url=None):
                     margin: 12px 0; font-weight: 700; }}
   .help {{ background:#e8f4ff; padding:12px; border-radius:8px;
            font-size:13px; margin-bottom:14px; line-height: 1.6; }}
+  .img-bank {{ margin-top: 24px; padding: 16px; background: #f9f9f9;
+               border-radius: 12px; border: 1px solid #eee; }}
+  .bank-h3 {{ font-size: 15px; margin: 0 0 6px; color: #444; }}
+  .bank-desc {{ font-size: 13px; color: #666; line-height: 1.5; margin: 0 0 12px; }}
+  .bank-item {{ margin: 14px 0; }}
+  .bank-num {{ font-size: 12px; color: #999; margin-bottom: 4px; font-weight: 600; }}
+  .bank-item img {{ max-width: 100%; height: auto;
+                    border-radius: 8px; display: block; }}
 </style></head><body>
 
 <div class="help">
-✅ <b>이렇게 쓰세요</b><br>
+✅ <b>PC 웹에서</b><br>
 1. <b>본문 복사</b> 탭 → 네이버 글쓰기 본문에 붙여넣기 (이미지 자동 첨부)<br>
 2. <b>제목 복사</b> 탭 → 네이버 제목 칸에 붙여넣기<br>
 3. <b>태그 복사</b> 탭 → 네이버 태그 칸에 붙여넣기<br>
-4. 카테고리: <b>{rewritten['category']}</b> 선택 후 발행
+4. 카테고리: <b>{rewritten['category']}</b> 선택 후 발행<br>
+<br>
+📱 <b>네이버 블로그 앱(모바일)에서는</b> 외부 URL 이미지를 인식하지 못합니다.
+본문 복사·붙여넣기 후, 페이지 아래 <b>📥 모바일용 이미지</b> 섹션의 사진을 길게 눌러 저장한 다음, 앱의 사진 첨부에서 갤러리로 첨부하세요.
 </div>
 
 <div class="actions">
@@ -3522,6 +3609,8 @@ def save_naver_draft(rewritten, kw, original_url=None):
 <div id="data-body">
 {full_body_html}
 </div>
+
+{img_bank_html}
 
 <div class="tags-box">
 <b>태그</b>: <span id="data-tags">{tags_safe}</span>
