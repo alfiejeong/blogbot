@@ -3218,6 +3218,87 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
         return None
 
 
+def update_naver_index():
+    """
+    naver_drafts/ 폴더 내 모든 .html 초안 파일을 스캔해서
+    index.html을 모바일 친화적 카드 목록 페이지로 자동 갱신.
+    파일명 형식: YYYY-MM-DD-HHMM_slug.html
+    """
+    try:
+        if not os.path.isdir(NAVER_DRAFTS_DIR):
+            return
+        from datetime import datetime as _dt
+        entries = []
+        for fname in os.listdir(NAVER_DRAFTS_DIR):
+            if not fname.endswith(".html") or fname == "index.html":
+                continue
+            m = re.match(r"^(\d{4}-\d{2}-\d{2}-\d{4})_(.+)\.html$", fname)
+            if not m:
+                continue
+            ts_str, slug = m.group(1), m.group(2)
+            # 제목은 HTML <title> 태그에서 추출
+            try:
+                with open(os.path.join(NAVER_DRAFTS_DIR, fname), "r", encoding="utf-8") as _f:
+                    head = _f.read(2000)
+                tm = re.search(r"<title>(.*?)</title>", head, re.DOTALL)
+                title = tm.group(1).strip() if tm else slug
+            except Exception:
+                title = slug
+            try:
+                dt = _dt.strptime(ts_str, "%Y-%m-%d-%H%M")
+                ts_h = dt.strftime("%Y-%m-%d %H:%M")
+                sort_key = dt.timestamp()
+            except Exception:
+                ts_h = ts_str
+                sort_key = 0
+            entries.append({"file": fname, "title": title, "ts": ts_h, "key": sort_key})
+        entries.sort(key=lambda x: x["key"], reverse=True)
+
+        if not entries:
+            cards_html = '<p class="empty">아직 생성된 초안이 없습니다. 다음 정각에 다시 확인하세요.</p>'
+        else:
+            cards_html = "\n".join(
+                f'<a class="card" href="./{e["file"]}">'
+                f'<div class="card-title">{e["title"]}</div>'
+                f'<div class="card-meta">{e["ts"]}</div>'
+                f'</a>'
+                for e in entries
+            )
+        now_h = _dt.now().strftime("%Y-%m-%d %H:%M")
+
+        index_html = f"""<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Naver 초안 목록</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+         max-width: 720px; margin: 0 auto; padding: 16px; color: #222;
+         background: #fafafa; }}
+  h1 {{ font-size: 20px; margin: 8px 0 4px; }}
+  .sub {{ color: #666; font-size: 13px; margin-bottom: 18px; }}
+  .card {{ display: block; padding: 16px; margin: 10px 0;
+           background: #fff; border-radius: 12px;
+           border: 1px solid #eee; text-decoration: none;
+           color: inherit; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+  .card:active {{ background: #f0f8ff; }}
+  .card-title {{ font-size: 16px; font-weight: 600; line-height: 1.4; }}
+  .card-meta {{ font-size: 12px; color: #999; margin-top: 6px; }}
+  .empty {{ color: #999; text-align: center; padding: 40px 0; }}
+  .footer {{ margin-top: 24px; padding-top: 16px; border-top: 1px solid #eee;
+             color: #aaa; font-size: 12px; text-align: center; }}
+</style></head><body>
+<h1>Naver 블로그 초안</h1>
+<div class="sub">총 {len(entries)}건 · 최근 갱신 {now_h}</div>
+{cards_html}
+<div class="footer">처리 후 .html 파일을 삭제하면 목록에서 사라집니다.</div>
+</body></html>"""
+        with open(os.path.join(NAVER_DRAFTS_DIR, "index.html"), "w", encoding="utf-8") as _f:
+            _f.write(index_html)
+    except Exception as e:
+        log(f"   index 갱신 실패: {str(e)[:80]}")
+
+
 def save_naver_draft(rewritten, kw, original_url=None):
     """
     네이버 윤색본을 두 형식으로 저장:
@@ -3441,6 +3522,8 @@ async function copyTextFromId(btn, id) {{
             f.write(html_content)
 
         log(f"📝 네이버 드래프트 저장: {md_path} (+.html)")
+        # 초안 저장될 때마다 index.html(모바일 목록 페이지) 자동 갱신
+        update_naver_index()
         return md_path
     except Exception as e:
         log(f"   네이버 드래프트 저장 실패: {str(e)[:80]}")
