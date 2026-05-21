@@ -1579,6 +1579,44 @@ def parse_press_article(url):
     return out
 
 
+def verify_wp_media(url, attach_id=None):
+    """
+    WP가 업로드 200 응답했지만 실제 파일이 디스크에 저장됐는지 HEAD로 검증.
+    - cafe24 디스크 풀일 때 DB에는 attachment가 생기지만 파일 write 실패하는 케이스 차단
+    - mod_security/플러그인이 파일만 막고 메타는 남기는 케이스 차단
+    검증 실패 시 orphan attachment(DB만 남은 미디어)도 자동 삭제.
+    반환: True(정상, 사용 가능) / False(실패, 폐기)
+    """
+    if not url:
+        return False
+    ok = False
+    try:
+        v = requests.head(url, timeout=10, allow_redirects=True)
+        clen = int(v.headers.get("content-length", "0") or "0")
+        if v.status_code == 200 and clen >= 1000:
+            ok = True
+        else:
+            log(f"   ⚠️ 업로드 검증 실패 status={v.status_code} size={clen}B → {url}")
+    except Exception as e:
+        log(f"   ⚠️ 업로드 검증 예외: {e}")
+
+    if ok:
+        return True
+
+    # orphan attachment 정리 (DB만 남고 파일 없는 케이스 — 광화문 모노로그 사고 재발 방지)
+    if attach_id:
+        try:
+            requests.delete(
+                f"{WP_BASE}/media/{attach_id}",
+                params={"force": "true"},
+                auth=auth, timeout=10,
+            )
+            log(f"   🗑 orphan attachment 삭제: id={attach_id}")
+        except Exception as e:
+            log(f"   ⚠️ orphan 삭제 실패: {e}")
+    return False
+
+
 def rehost_image_to_wp(image_url, referer=None):
     """
     이미지 다운로드 → WP 미디어 라이브러리 업로드 → (wp_id, wp_url) 반환.
@@ -1615,7 +1653,11 @@ def rehost_image_to_wp(image_url, referer=None):
         )
         if ru.status_code in (200, 201):
             j = ru.json()
-            return j.get("id"), j.get("source_url")
+            aid, aurl = j.get("id"), j.get("source_url")
+            # 업로드 직후 검증: WP가 200 줬어도 디스크에 파일 없으면 폐기
+            if not verify_wp_media(aurl, aid):
+                return None, None
+            return aid, aurl
         log(f"   재호스팅 응답 {ru.status_code}: {ru.text[:120]}")
     except Exception as e:
         log(f"   재호스팅 실패: {e}")
@@ -2892,7 +2934,12 @@ def upload_featured_image(img):
         }
         r = requests.post(f"{WP_BASE}/media", auth=auth, headers=headers, data=binary, timeout=40)
         if r.status_code in (200, 201):
-            return r.json().get("id")
+            j = r.json()
+            aid, aurl = j.get("id"), j.get("source_url")
+            # 업로드 직후 검증: 파일이 실제로 디스크에 저장됐는지 확인
+            if not verify_wp_media(aurl, aid):
+                return None
+            return aid
         log(f"미디어 업로드 응답 {r.status_code}: {r.text[:160]}")
     except Exception as e:
         log(f"미디어 업로드 실패: {e}")
