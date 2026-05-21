@@ -3169,9 +3169,16 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
 1. 제목: 원본과 의미 동일하지만 표현 다르게. 키워드는 보존. 35자 이내.
 2. 첫 문단: 강한 한 줄 훅 (모바일 검색 미리보기에 노출됨)
 3. 본문: 같은 정보·톤. 표현만 다듬기 (워드프레스 본문 그대로 복사 금지)
-4. H2/마크다운 X. 평문 + 줄바꿈 위주.
-5. 본문 분량 400~700자.
-6. 마지막 줄에 시그니처 그대로 박기 (반드시 https:// 포함, 네이버 자동 링크 깨짐 방지):
+4. 본문 구조 (가독성·시각적 재미를 위해 반드시 지킬 것):
+   - 소제목 2~3개 사용. 형식 = "이모지 한 칸 + 짧은 한 줄(20자 이내)", 끝에 마침표 금지.
+     예: 🔥 그날 무슨 일이?  /  ✨ 다음 행보는?  /  💬 반응은 어땠나
+     원문 H2가 [대괄호] 안에 평문화돼서 들어와 있으니 그것의 의미를 살려서 이모지+짧은 한 줄로 변환.
+   - 본문 중간에 강조 한 줄 1개. 형식 = "▶ " 또는 "💡 "로 시작 (핵심 한 문장).
+   - 각 문단·각 소제목 사이에는 빈 줄(\n\n) 한 줄씩 넣기. 절대 붙여 쓰지 말 것.
+   - 마크다운(#, **, ## 등) 금지. h2/h3 HTML 태그도 금지. 평문 + 이모지만 사용.
+5. 본문 분량 600~900자 (소제목·이모지·강조 줄 포함).
+6. 톤: 구어체·궁금증 유발. "~했다는데?", "~인지 한번 볼까?" 같은 표현 적극 사용.
+7. 마지막 줄에 시그니처 그대로 박기 (반드시 https:// 포함, 네이버 자동 링크 깨짐 방지):
    📍 자세한 글: https://whyhot.kr
    🚗 주차 정보가 필요하면 거지주차닷컴 검색
 
@@ -3374,33 +3381,86 @@ def save_naver_draft(rewritten, kw, original_url=None):
 
         # ── 2) .html 파일 (한 탭 복사 버튼 + 이미지 인라인 첨부)
         html_path = os.path.join(NAVER_DRAFTS_DIR, f"{ts_full}_{slug}.html")
-        # 본문 줄바꿈 → <p>로 변환 + 이미지 균등 분배
-        paragraphs = [p.strip() for p in rewritten['body'].split("\n") if p.strip()]
-        # 본문 문단 사이에 이미지 분배 (자연스러운 위치)
+
+        # 본문을 줄 단위로 파싱해 소제목·강조·시그니처·본문으로 분류
+        raw_lines = rewritten['body'].split("\n")
+        classified = []  # list of (type, text)
+        for line in raw_lines:
+            s = line.strip()
+            if not s:
+                continue
+            # 시그니처 라인 (마지막 두 줄)
+            if s.startswith("📍") or s.startswith("🚗"):
+                classified.append(("sig", s))
+                continue
+            # 강조 라인: ▶ 또는 💡로 시작 + 너무 길지 않음
+            if (s.startswith("▶") or s.startswith("💡")) and len(s) <= 100:
+                classified.append(("emp", s))
+                continue
+            # 소제목 후보: 첫 글자가 한글/영문/숫자가 아니고(=이모지·특수기호) 짧음
+            first = s[0]
+            is_kor = '가' <= first <= '힣'
+            if (not first.isalnum()) and (not is_kor) and len(s) <= 30:
+                classified.append(("h3", s))
+                continue
+            classified.append(("p", s))
+
+        # 빈 줄(네이버 에디터가 단락 사이 간격으로 인식)
+        empty_line = '<p style="margin:10px 0;line-height:1;">&nbsp;</p>'
+
         body_parts = []
-        n_paras = len(paragraphs)
         n_imgs = len(image_urls)
-        # 이미지를 문단 2개마다 한 장씩 끼워넣기
         img_idx = 0
-        for i, p in enumerate(paragraphs):
-            body_parts.append(f"<p>{p}</p>")
-            # 매 2문단마다 이미지 한 장 (가능한 만큼)
-            if (i + 1) % 2 == 0 and img_idx < n_imgs:
+        p_count = 0  # 일반 본문 단락 카운트 (이미지 분배 기준)
+
+        for typ, s in classified:
+            if typ == "h3":
+                body_parts.append(
+                    f'<h3 style="font-size:18px;color:#2c5fa5;'
+                    f'border-left:4px solid #4a90e2;padding:6px 0 6px 12px;'
+                    f'margin:28px 0 12px;font-weight:700;line-height:1.4;">{s}</h3>'
+                )
+            elif typ == "emp":
+                body_parts.append(
+                    f'<p style="background:#fff5e6;padding:14px 16px;'
+                    f'border-radius:10px;margin:20px 0;font-weight:600;'
+                    f'color:#b35e00;line-height:1.6;">{s}</p>'
+                )
+            elif typ == "sig":
+                body_parts.append(
+                    f'<p style="background:#f0f8ff;padding:10px 14px;'
+                    f'border-radius:8px;margin:14px 0;color:#1f6feb;'
+                    f'line-height:1.6;">{s}</p>'
+                )
+            else:
+                body_parts.append(
+                    f'<p style="margin:14px 0;line-height:1.75;font-size:16px;">{s}</p>'
+                )
+                p_count += 1
+
+            # 모든 요소 뒤에 빈 줄 삽입(네이버 가독성 강제)
+            body_parts.append(empty_line)
+
+            # 일반 본문 단락 2개마다 이미지 한 장 끼워넣기
+            if typ == "p" and p_count > 0 and p_count % 2 == 0 and img_idx < n_imgs:
                 u = image_urls[img_idx]
                 body_parts.append(
-                    f'<p><img src="{u}" '
-                    f'style="max-width:100%;height:auto;display:block;margin:14px auto;" '
+                    f'<p style="margin:20px 0;text-align:center;"><img src="{u}" '
+                    f'style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" '
                     f'alt="{rewritten["title"]}"></p>'
                 )
+                body_parts.append(empty_line)
                 img_idx += 1
-        # 남은 이미지가 있으면 본문 끝에 첨부
+
+        # 남은 이미지는 시그니처 직전(또는 끝)에 첨부
         while img_idx < n_imgs:
             u = image_urls[img_idx]
             body_parts.append(
-                f'<p><img src="{u}" '
-                f'style="max-width:100%;height:auto;display:block;margin:14px auto;" '
+                f'<p style="margin:20px 0;text-align:center;"><img src="{u}" '
+                f'style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" '
                 f'alt="{rewritten["title"]}"></p>'
             )
+            body_parts.append(empty_line)
             img_idx += 1
         full_body_html = "\n".join(body_parts)
 
