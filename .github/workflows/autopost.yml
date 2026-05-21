@@ -46,6 +46,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No new Naver drafts to commit."
           else
-            git commit -m "chore: add Naver drafts [skip ci]"
+            git commit -m "chore: add Naver drafts"
             git push
           fi
