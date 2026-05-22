@@ -67,7 +67,7 @@ MODEL_FALLBACK_CHAIN = [
     MODEL_ID,                  # gemini-2.5-flash (primary)
     "gemini-2.5-flash-lite",   # 더 가벼움, 부하 적음
     "gemini-2.0-flash",        # 이전 세대지만 안정적
-    "gemini-1.5-flash",        # 마지막 안전망
+    "gemini-2.0-flash-lite",   # 마지막 안전망 (1.5-flash는 2025-09 deprecated)
 ]
 
 
@@ -263,27 +263,45 @@ def collect_place_images_via_blog(kw, target=3):
     log(f"   📝 가게명 블로그 검색 결과 {len(items)}건")
     out = []
     seen_src = set()
+    n_og, n_body = 0, 0
     for it in items[:8]:
         if len(out) >= target:
             break
         link = it.get("link", "")
         if not link:
             continue
-        og = extract_og_image_from_url(link)
-        if not og or og in seen_src:
+        # 1차: OG/twitter:image — 블로그 대표 썸네일
+        src = extract_og_image_from_url(link)
+        source_tag = "blog_og"
+        # 2차: OG가 없으면 본문 첫 이미지 폴백 (네이버 블로그 본문에 가게 실제 사진 풍부)
+        if not src:
+            src = extract_first_body_image(link)
+            source_tag = "blog_body"
+        if not src or src in seen_src:
             continue
-        seen_src.add(og)
-        wp_id, wp_url = rehost_image_to_wp(og, referer=link)
+        seen_src.add(src)
+        wp_id, wp_url = rehost_image_to_wp(src, referer=link)
         if not wp_url:
             continue
+        # 인용 형태로 출처 명시: 블로그 본문 이미지는 원문 URL을 figcaption에 박아 인용 한도 준수
+        credit = (
+            f'사진: <a href="{link}" rel="nofollow">관련 블로그 포스트</a>'
+        )
         out.append({
             "url": wp_url,
             "alt": kw,
-            "credit": "사진: 관련 블로그 포스트",
+            "credit": credit,
             "wp_id": wp_id,
-            "source": "blog_og",
+            "source": source_tag,
         })
-        log(f"   ✓ 블로그 OG 채택: {it['title'][:40]}")
+        if source_tag == "blog_og":
+            n_og += 1
+            log(f"   ✓ 블로그 OG 채택: {it['title'][:40]}")
+        else:
+            n_body += 1
+            log(f"   ✓ 블로그 본문 이미지 채택: {it['title'][:40]}")
+    if n_og or n_body:
+        log(f"   📝 블로그 이미지 결과: OG {n_og} / 본문 폴백 {n_body}")
     return out
 
 
@@ -1731,6 +1749,83 @@ def extract_og_image_from_url(url):
     return None
 
 
+def extract_first_body_image(url):
+    """
+    페이지 본문에서 첫 번째 의미있는 <img> 추출. OG 폴백 용도.
+    네이버 블로그/맛집 가게 홈페이지의 본문 사진을 인용(출처 명시) 형태로 사용.
+
+    - 네이버 블로그(blog.naver.com)는 모바일 URL(m.blog.naver.com)로 변환 후 본문 접근
+    - SmartEditor 본문 컨테이너(div.se-main-container) 우선 탐색
+    - 아이콘·로고·spacer·SVG·작은 thumbnail은 제외
+    - 출처 URL 보존(referer)
+    """
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        from bs4 import BeautifulSoup
+        from urllib.parse import urlparse, urljoin
+
+        # 네이버 블로그는 PC URL이 iframe 기반이라 모바일 URL로 변환해야 본문 추출 가능
+        target_url = url
+        parsed = urlparse(url)
+        if "blog.naver.com" in parsed.netloc and not parsed.netloc.startswith("m."):
+            m_nb = re.match(r"https?://blog\.naver\.com/([^/?]+)/(\d+)", url)
+            if m_nb:
+                target_url = f"https://m.blog.naver.com/{m_nb.group(1)}/{m_nb.group(2)}"
+
+        r = requests.get(
+            target_url,
+            headers={"User-Agent": PRESS_USER_AGENT, "Accept-Language": "ko-KR,ko;q=0.9"},
+            timeout=10,
+            allow_redirects=True,
+        )
+        if r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # 본문 컨테이너 우선 탐색 (네이버 블로그/티스토리/일반)
+        main = (
+            soup.find("div", class_="se-main-container") or
+            soup.find("div", id="postViewArea") or
+            soup.find("article") or
+            soup.find("main") or
+            soup
+        )
+
+        for img in main.find_all("img"):
+            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+            if not src:
+                continue
+            src = src.strip()
+            # 상대 URL 절대화
+            if src.startswith("//"):
+                src = "https:" + src
+            elif src.startswith("/"):
+                src = urljoin(target_url, src)
+            elif not src.startswith("http"):
+                continue
+            sl = src.lower()
+            # 노이즈 제거: SVG·데이터URL·아이콘·로고·스페이서·이모지
+            if any(p in sl for p in [".svg", "data:image", "spacer", "/icon", "logo", "blank.gif", "/emoticon"]):
+                continue
+            # 네이버 블로그 사이즈 힌트로 작은 이미지 제외 (?type=w80 같은 썸네일)
+            m_w = re.search(r"\?type=w(\d+)", sl)
+            if m_w and int(m_w.group(1)) < 400:
+                continue
+            # 명시적 width/height 속성으로도 거르기
+            try:
+                w = int(img.get("width", "0") or 0)
+                h = int(img.get("height", "0") or 0)
+                if (0 < w < 200) or (0 < h < 200):
+                    continue
+            except Exception:
+                pass
+            return src
+    except Exception as e:
+        log(f"   본문 이미지 추출 실패 {url[:50]}: {str(e)[:60]}")
+    return None
+
+
 def collect_place_images_via_naver_local(kw, target=3):
     """
     네이버 지역 검색 → 가게 홈페이지 → og:image 추출 → WP 재호스팅.
@@ -1750,29 +1845,42 @@ def collect_place_images_via_naver_local(kw, target=3):
     out = []
     rejected_no_link = 0
     rejected_no_og = 0
+    n_og, n_body = 0, 0
     for p in places:
         if len(out) >= target:
             break
         if not p["link"]:
             rejected_no_link += 1
             continue
-        og_url = extract_og_image_from_url(p["link"])
-        if not og_url:
+        # 1차: 가게 홈페이지의 OG/twitter:image
+        img_url = extract_og_image_from_url(p["link"])
+        source_tag = "naver_local_og"
+        credit = f"사진: {p['name']} 공식 홈페이지"
+        # 2차: OG가 없으면 가게 홈페이지 본문 첫 이미지 폴백 (메뉴·매장 사진 등)
+        if not img_url:
+            img_url = extract_first_body_image(p["link"])
+            if img_url:
+                source_tag = "naver_local_body"
+        if not img_url:
             rejected_no_og += 1
             continue
-        wp_id, wp_url = rehost_image_to_wp(og_url, referer=p["link"])
+        wp_id, wp_url = rehost_image_to_wp(img_url, referer=p["link"])
         if not wp_url:
             continue
         out.append({
             "url": wp_url,
             "alt": p["name"],
-            "credit": f"사진: {p['name']} 공식 홈페이지",
+            "credit": credit,
             "wp_id": wp_id,
-            "source": "naver_local_og",
+            "source": source_tag,
         })
-        log(f"   ✓ 가게 OG 이미지 채택: {p['name']}")
-    log(f"   📍 지역 검색 결과: 채택 {len(out)} / 홈페이지 없음 {rejected_no_link} / "
-        f"OG 이미지 없음 {rejected_no_og}")
+        if source_tag == "naver_local_og":
+            n_og += 1
+        else:
+            n_body += 1
+        log(f"   ✓ 가게 이미지 채택({source_tag.split('_')[-1]}): {p['name']}")
+    log(f"   📍 지역 검색 결과: 채택 {len(out)} (OG {n_og} / 본문 {n_body}) / "
+        f"홈페이지 없음 {rejected_no_link} / 이미지 없음 {rejected_no_og}")
     return out
 
 
@@ -1954,7 +2062,7 @@ def filter_images_by_vision(pool, kw, category):
     # 출처별 신뢰도 — Vision 실패 시 통과 여부 결정
     # 강한 출처: 캡션·OG 등으로 이미 검증됨 → Vision 실패해도 통과
     # 약한 출처: 일반 검색 결과 → Vision 실패 시 거부 (무관 이미지 위험)
-    STRONG_SOURCES = {"press", "naver_local_og", "blog_og"}
+    STRONG_SOURCES = {"press", "naver_local_og", "naver_local_body", "blog_og", "blog_body"}
     for img in pool:
         url = img.get("url", "")
         source = img.get("source", "unknown")
