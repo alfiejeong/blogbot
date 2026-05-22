@@ -3212,9 +3212,12 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
    - 마크다운(#, **, ## 등) 금지. h2/h3 HTML 태그도 금지. 평문 + 이모지만 사용.
 5. 본문 분량 600~900자 (소제목·이모지·강조 줄 포함).
 6. 톤: 구어체·궁금증 유발. "~했다는데?", "~인지 한번 볼까?" 같은 표현 적극 사용.
-7. 마지막 줄에 시그니처 그대로 박기 (반드시 https:// 포함, 네이버 자동 링크 깨짐 방지):
-   📍 자세한 글: https://whyhot.kr
-   🚗 주차 정보가 필요하면 거지주차닷컴 검색
+7. 마지막에 시그니처 두 블록을 박되, URL은 반드시 줄 단독으로 배치 (네이버 자동 링크 활성화 위해 한 줄에 한글과 URL 섞지 말 것):
+   📍 자세한 글:
+   https://whyhot.kr
+
+   🚗 주차 정보:
+   https://거지주차.com
 
 [태그 10개]
 - 고정 5개: 오늘의이슈, 트렌드, 화제, 실시간이슈, 와이핫
@@ -3468,7 +3471,17 @@ def save_naver_draft(rewritten, kw, original_url=None):
         img_idx = 0
         p_count = 0  # 일반 본문 단락 카운트 (이미지 분배 기준)
 
+        # 평문 안의 URL을 <a> 태그로 감싸기 — 네이버 자동 링크 트리거 실패해도
+        # 클릭 가능한 링크는 살아남게 하는 이중 안전망
+        def _linkify(text):
+            return re.sub(
+                r"(https?://[^\s<]+)",
+                r'<a href="\1" style="color:#1f6feb;text-decoration:underline;">\1</a>',
+                text
+            )
+
         for typ, s in classified:
+            s = _linkify(s)
             if typ == "h3":
                 body_parts.append(
                     f'<h3 style="font-size:18px;color:#2c5fa5;'
