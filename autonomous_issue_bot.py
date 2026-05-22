@@ -3305,6 +3305,7 @@ def update_naver_index():
                 f'<a class="card" href="./{e["file"]}">'
                 f'<div class="card-title">{e["title"]}</div>'
                 f'<div class="card-meta">{e["ts"]}</div>'
+                f'<span class="card-check">✓ 읽음</span>'
                 f'</a>'
                 for e in entries
             )
@@ -3326,8 +3327,15 @@ def update_naver_index():
            border: 1px solid #eee; text-decoration: none;
            color: inherit; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
   .card:active {{ background: #f0f8ff; }}
+  /* 방문한 카드 — 읽은 글 시각적 구분 (브라우저 기록 기반 자동 처리) */
+  .card:visited {{ background: #f5f5f5; border-color: #e5e5e5; }}
+  .card:visited .card-title {{ color: #999; text-decoration: line-through; }}
+  .card:visited .card-meta {{ color: #bbb; }}
+  .card:visited .card-check {{ color: #4caf50; }}
   .card-title {{ font-size: 16px; font-weight: 600; line-height: 1.4; }}
   .card-meta {{ font-size: 12px; color: #999; margin-top: 6px; }}
+  .card-check {{ display: block; margin-top: 6px; font-size: 12px;
+                 color: transparent; font-weight: 600; }}
   .empty {{ color: #999; text-align: center; padding: 40px 0; }}
   .footer {{ margin-top: 24px; padding-top: 16px; border-top: 1px solid #eee;
              color: #aaa; font-size: 12px; text-align: center; }}
