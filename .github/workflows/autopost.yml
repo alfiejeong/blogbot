@@ -2,7 +2,7 @@ name: Autonomous Trend Post
 on:
   schedule:
     # 매시간 정각 (UTC 기준). 한국시간으로도 매시간 정각.
-    - cron: '0 * * * *'
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 # 동시 실행 방지: 이전 실행이 끝나기 전엔 새로 안 띄움
 concurrency:
