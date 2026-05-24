@@ -2700,7 +2700,9 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 }}"""
 
     try:
-        res = gemini_generate(prompt, label="post")
+        # prefer_lite=True: 직전 로그에서 본문 생성도 lite 모델에서 결정적 성공.
+        # 메인 flash가 quota 막힌 상태에서 처음부터 lite 시도하면 한 단계 빨리 성공.
+        res = gemini_generate(prompt, label="post", prefer_lite=True)
         txt = res.text.strip()
         txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
         m = re.search(r"\{.*\}", txt, re.DOTALL)
