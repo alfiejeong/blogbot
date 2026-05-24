@@ -76,65 +76,82 @@ def _call_groq(contents, label=""):
     Groq Llama 최후 폴백 — Gemini 전체 체인이 quota로 막혔을 때만 호출.
     응답을 SimpleNamespace(text=...) 형태로 반환해 Gemini 호출부와 호환.
     Vision(이미지) 호출은 텍스트 모델이라 지원 안 함 → label="vision" 제외.
-    무료 한도: RPD 14,400 (Gemini 대비 약 10배).
+
+    Groq 무료 한도: 모델별 RPM 30 / TPM 6,000 / RPD 14,400. 분당이 박해서
+    한 모델에 호출 몰리면 429 폭주 → 여러 모델로 분산해 호출.
     """
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
         return None
-    try:
-        from types import SimpleNamespace
-        # multimodal contents(이미지 포함)는 Llama 텍스트 모델로 처리 불가 → 텍스트만 추출
-        if isinstance(contents, list):
-            text_parts = [p for p in contents if isinstance(p, str)]
-            if not text_parts:
-                return None
-            prompt = "\n".join(text_parts)
-        else:
-            prompt = str(contents)
-        log(f"   🆘 Groq[llama-3.3-70b-versatile] 최후 폴백 시도 ({label})")
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                # 본문이 잘리지 않도록 충분히 (이전 131자 잘림 케이스 방지)
-                "max_tokens": 4000,
-            },
-            timeout=60,
-        )
-        r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"]
+    from types import SimpleNamespace
+    # multimodal contents(이미지 포함)는 Llama 텍스트 모델로 처리 불가 → 텍스트만 추출
+    if isinstance(contents, list):
+        text_parts = [p for p in contents if isinstance(p, str)]
+        if not text_parts:
+            return None
+        prompt = "\n".join(text_parts)
+    else:
+        prompt = str(contents)
 
-        # JSON 응답이 기대되는 호출에 한해 Llama 응답 정제
-        # — Llama가 가끔 raw 줄바꿈(제어문자)을 JSON string 안에 넣어 호출부 파싱 깨뜨림.
-        # 여기서 strict=False로 한 번 파싱 후 깔끔히 다시 dumps해서 호출부 영향 없게.
-        if any(x in label for x in ("classify", "post", "naver-rewrite", "discover-places")):
-            try:
-                cleaned = text
-                # 코드블록 마커 제거 (Llama가 ```json``` 감싸는 경우 있음)
-                cleaned = re.sub(r"```(?:json)?", "", cleaned).strip("`").strip()
-                # 첫 JSON 객체/배열 영역만 추출
-                m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
-                if m:
-                    cleaned = m.group(1)
-                # \t \n \r 외 제어문자 제거
-                cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
-                # strict=False면 string value 안의 raw 줄바꿈 허용
-                data = json.loads(cleaned, strict=False)
-                # 호출부에서 안전하게 다시 파싱하도록 깔끔히 dumps
-                text = json.dumps(data, ensure_ascii=False)
-            except Exception as je:
-                log(f"   Groq JSON 정제 실패 ({label}): {str(je)[:80]}")
-                # 정제 실패 시 원본 그대로 반환 (호출부 폴백 시도)
-        return SimpleNamespace(text=text)
-    except Exception as e:
-        log(f"   Groq 폴백도 실패 ({label}): {str(e)[:80]}")
-        return None
+    # Groq 모델 폴백 체인 — 각 모델은 한도 독립이라 분산 효과
+    GROQ_MODELS = [
+        "llama-3.3-70b-versatile",      # 메인 (품질 좋음)
+        "llama-3.1-8b-instant",          # 가벼움, 빠름
+        "openai/gpt-oss-20b",            # 다른 계열, 한도 독립
+    ]
+
+    last_err = None
+    for model_name in GROQ_MODELS:
+        try:
+            log(f"   🆘 Groq[{model_name}] 시도 ({label})")
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 4000,
+                },
+                timeout=60,
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"]
+
+            # JSON 응답 기대되는 호출은 응답 정제 (raw 줄바꿈 등 처리)
+            if any(x in label for x in ("classify", "post", "naver-rewrite", "discover-places")):
+                try:
+                    cleaned = text
+                    cleaned = re.sub(r"```(?:json)?", "", cleaned).strip("`").strip()
+                    m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+                    if m:
+                        cleaned = m.group(1)
+                    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
+                    data = json.loads(cleaned, strict=False)
+                    text = json.dumps(data, ensure_ascii=False)
+                except Exception as je:
+                    log(f"   Groq JSON 정제 실패 ({label}): {str(je)[:80]}")
+            # 분당 RPM 30 보호: 다음 호출 전 짧은 sleep으로 호출 분산
+            time.sleep(2)
+            return SimpleNamespace(text=text)
+        except requests.HTTPError as he:
+            last_err = he
+            status = getattr(he.response, "status_code", None)
+            if status == 429:
+                log(f"   ⚠️ Groq[{model_name}] 429 → 다음 모델로 분산")
+                time.sleep(1)
+                continue
+            log(f"   Groq[{model_name}] HTTP {status}: {str(he)[:60]}")
+            continue
+        except Exception as e:
+            last_err = e
+            log(f"   Groq[{model_name}] 예외: {str(e)[:60]}")
+            continue
+    log(f"   Groq 모든 모델 실패 ({label}): {str(last_err)[:80] if last_err else 'unknown'}")
+    return None
 
 
 def gemini_generate(contents, label="", prefer_lite=False):
