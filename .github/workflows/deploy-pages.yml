@@ -1,9 +1,9 @@
 name: Deploy Naver drafts to GitHub Pages
 on:
-  push:
+  workflow_run:
+    workflows: ["Autonomous Trend Post"]
+    types: [completed]
     branches: [main]
-    paths:
-      - 'naver_drafts/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,6 +14,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   deploy:
+    # autopost가 성공했거나 수동 실행일 때만 배포
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
