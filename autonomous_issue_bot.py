@@ -71,14 +71,25 @@ MODEL_FALLBACK_CHAIN = [
 ]
 
 
-def gemini_generate(contents, label=""):
+def gemini_generate(contents, label="", prefer_lite=False):
     """
     primary 모델에서 백오프 재시도 (3회), 끝까지 503이면 폴백 모델로.
     503/429/500/502/504/RESOURCE_EXHAUSTED 같은 일시적 에러만 retry.
+    prefer_lite=True면 lite 모델부터 시도 — quota 부담 적은 호출(네이버 윤색 등)에 사용.
     """
     delays_primary = [2, 5, 10]
     last_err = None
-    for model_idx, model in enumerate(MODEL_FALLBACK_CHAIN):
+    if prefer_lite:
+        # 가벼운 모델 우선 — 무거운 모델(flash)의 quota를 분류·본문 생성에 아끼기
+        chain = [
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash-lite",
+            MODEL_ID,
+            "gemini-2.0-flash",
+        ]
+    else:
+        chain = MODEL_FALLBACK_CHAIN
+    for model_idx, model in enumerate(chain):
         is_primary = (model_idx == 0)
         retries = 3 if is_primary else 1  # primary는 3번, 폴백은 1번씩
         for attempt in range(retries):
@@ -3375,8 +3386,17 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
   "body": "재작성된 본문 (줄바꿈 포함, 평문)",
   "tags": ["오늘의이슈","트렌드","화제","실시간이슈","와이핫","가변1","가변2","가변3","가변4","가변5"]
 }}"""
+    # 이미지 URL 모음 (외부 직링크 첨부용) — 정상/폴백 양쪽 공용
+    img_urls = []
+    if images:
+        for im in images:
+            u = im.get("url")
+            if u and u not in img_urls:
+                img_urls.append(u)
+
     try:
-        res = gemini_generate(prompt, label="naver-rewrite")
+        # prefer_lite=True: 무거운 flash quota 아껴두기 위해 lite 모델 우선 시도
+        res = gemini_generate(prompt, label="naver-rewrite", prefer_lite=True)
         txt = (res.text or "").strip()
         txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
         m = re.search(r"\{.*\}", txt, re.DOTALL)
@@ -3388,14 +3408,7 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
         tags = data.get("tags") or []
         tags = [str(t).strip().lstrip("#") for t in tags if t][:10]
         if not body_n:
-            return None
-        # 이미지 URL 모음 (외부 직링크 첨부용)
-        img_urls = []
-        if images:
-            for im in images:
-                u = im.get("url")
-                if u and u not in img_urls:
-                    img_urls.append(u)
+            raise ValueError("empty body from gemini")
         return {
             "title": title_n,
             "body": body_n,
@@ -3404,8 +3417,27 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
             "image_urls": img_urls,
         }
     except Exception as e:
-        log(f"   네이버 재작성 실패: {str(e)[:80]}")
-        return None
+        log(f"   네이버 재작성 실패 → 원본 본문 폴백 사용: {str(e)[:80]}")
+        # ━━ 폴백: 원본 WP 본문을 평문화해서 그대로 저장 ━━
+        # 사용자가 모바일에서 본문 두 세 줄 손수 다듬어 네이버에 올리는 흐름.
+        # 카드 페이지 제목 앞에 [원본] 표시로 구분.
+        try:
+            body_fallback = (
+                plain[:1500].strip()
+                + "\n\n📍 자세한 글:\nhttps://whyhot.kr"
+                + "\n\n🚗 주차 정보:\nhttps://거지주차.com"
+            )
+            return {
+                "title": f"[원본] {orig_title[:32]}",
+                "body": body_fallback,
+                "tags": ["오늘의이슈", "트렌드", "화제", "실시간이슈", "와이핫", kw][:10],
+                "category": cat_kr,
+                "image_urls": img_urls,
+                "_is_fallback": True,
+            }
+        except Exception as e2:
+            log(f"   네이버 폴백 생성도 실패: {str(e2)[:80]}")
+            return None
 
 
 def update_naver_index():
@@ -3753,6 +3785,16 @@ def save_naver_draft(rewritten, kw, original_url=None):
   .bank-item img {{ max-width: 100%; height: auto;
                     border-radius: 8px; display: block; }}
 </style></head><body>
+
+{
+    '<div style="background:#fff3cd;border:1px solid #ffc107;padding:14px 16px;border-radius:10px;margin-bottom:14px;color:#856404;line-height:1.6;font-size:14px;">'
+    '⚠️ <b>AI 윤색 미적용 — 원본 본문</b><br>'
+    'Gemini quota 부족으로 네이버용 재작성이 실패했습니다. '
+    'WP 원문 그대로라 그대로 올리면 <b>네이버 검색 페널티</b> 위험. '
+    '본문 복사 후 두 세 문장 손수 다듬어 발행하세요.'
+    '</div>'
+    if rewritten.get('_is_fallback') else ''
+}
 
 <div class="help">
 ✅ <b>PC 웹에서</b><br>
