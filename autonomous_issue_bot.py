@@ -71,11 +71,54 @@ MODEL_FALLBACK_CHAIN = [
 ]
 
 
+def _call_groq(contents, label=""):
+    """
+    Groq Llama 최후 폴백 — Gemini 전체 체인이 quota로 막혔을 때만 호출.
+    응답을 SimpleNamespace(text=...) 형태로 반환해 Gemini 호출부와 호환.
+    Vision(이미지) 호출은 텍스트 모델이라 지원 안 함 → label="vision" 제외.
+    무료 한도: RPD 14,400 (Gemini 대비 약 10배).
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from types import SimpleNamespace
+        # multimodal contents(이미지 포함)는 Llama 텍스트 모델로 처리 불가 → 텍스트만 추출
+        if isinstance(contents, list):
+            text_parts = [p for p in contents if isinstance(p, str)]
+            if not text_parts:
+                return None
+            prompt = "\n".join(text_parts)
+        else:
+            prompt = str(contents)
+        log(f"   🆘 Groq[llama-3.3-70b-versatile] 최후 폴백 시도 ({label})")
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"]
+        return SimpleNamespace(text=text)
+    except Exception as e:
+        log(f"   Groq 폴백도 실패 ({label}): {str(e)[:80]}")
+        return None
+
+
 def gemini_generate(contents, label="", prefer_lite=False):
     """
     primary 모델에서 백오프 재시도 (3회), 끝까지 503이면 폴백 모델로.
     503/429/500/502/504/RESOURCE_EXHAUSTED 같은 일시적 에러만 retry.
     prefer_lite=True면 lite 모델부터 시도 — quota 부담 적은 호출(네이버 윤색 등)에 사용.
+    Gemini 전체 체인이 다 실패하면 Groq Llama로 최후 폴백 (vision 호출은 제외).
     """
     delays_primary = [2, 5, 10]
     last_err = None
@@ -114,6 +157,14 @@ def gemini_generate(contents, label="", prefer_lite=False):
                         f"({attempt + 1}/{retries}, {wait}s): {err_str[:80]}")
                     time.sleep(wait)
                 # else: 다음 모델로
+
+    # ━━ Gemini 전체 체인 실패 → Groq Llama 최후 폴백 ━━
+    # vision은 텍스트 모델이라 폴백 X. 다른 호출(classify/post/naver-rewrite 등)만 시도.
+    if label != "vision":
+        groq_result = _call_groq(contents, label=label)
+        if groq_result is not None:
+            return groq_result
+
     if last_err:
         raise last_err
 
