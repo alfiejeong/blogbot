@@ -1,17 +1,18 @@
 name: Autonomous Trend Post
+
 on:
   schedule:
     # 매시간 정각 (UTC 기준). 한국시간으로도 매시간 정각.
-    - cron: '0 */3 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
+
 # 동시 실행 방지: 이전 실행이 끝나기 전엔 새로 안 띄움
 concurrency:
   group: autopost
   cancel-in-progress: false
 
-# naver_drafts/ 폴더를 봇 실행 후 자동 commit/push 하기 위해 write 권한 필요
 permissions:
-  contents: write
+  contents: write     # naver_drafts/ 폴더에 파일 커밋·푸시
 
 jobs:
   build:
@@ -19,15 +20,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -36,16 +34,18 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          # 검토 큐 모드 (값을 1로 두면 draft로 저장, 빈 값/제거하면 자동 발행)
+          PUBLISH_AS_DRAFT: ${{ vars.PUBLISH_AS_DRAFT }}
         run: python autonomous_issue_bot.py
-
       - name: Commit Naver drafts
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add naver_drafts/ 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No new Naver drafts to commit."
-          else
-            git commit -m "chore: add Naver drafts"
+          if [ -d naver_drafts ] && [ "$(ls -A naver_drafts 2>/dev/null)" ]; then
+            git add naver_drafts/
+            git diff --staged --quiet || git commit -m "naver drafts $(date -u +%Y-%m-%d-%H)"
             git push
+          else
+            echo "no naver drafts to commit"
           fi
