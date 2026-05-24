@@ -3568,27 +3568,11 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
             "image_urls": img_urls,
         }
     except Exception as e:
-        log(f"   네이버 재작성 실패 → 원본 본문 폴백 사용: {str(e)[:80]}")
-        # ━━ 폴백: 원본 WP 본문을 평문화해서 그대로 저장 ━━
-        # 사용자가 모바일에서 본문 두 세 줄 손수 다듬어 네이버에 올리는 흐름.
-        # 카드 페이지 제목 앞에 [원본] 표시로 구분.
-        try:
-            body_fallback = (
-                plain[:1500].strip()
-                + "\n\n📍 자세한 글:\nhttps://whyhot.kr"
-                + "\n\n🚗 주차 정보:\nhttps://거지주차.com"
-            )
-            return {
-                "title": f"[원본] {orig_title[:32]}",
-                "body": body_fallback,
-                "tags": ["오늘의이슈", "트렌드", "화제", "실시간이슈", "와이핫", kw][:10],
-                "category": cat_kr,
-                "image_urls": img_urls,
-                "_is_fallback": True,
-            }
-        except Exception as e2:
-            log(f"   네이버 폴백 생성도 실패: {str(e2)[:80]}")
-            return None
+        # 정두릅 결정 2026-05: [원본] 폴백 저장 금지.
+        # 윤색 실패 시 네이버 초안 자체를 만들지 않고 스킵 (원본 그대로 올리면 검색 페널티 + 수동 수정 부담).
+        # WP 발행은 별도 흐름이므로 영향 X.
+        log(f"   네이버 재작성 실패 → 초안 생성 스킵 (원본 폴백 금지): {str(e)[:80]}")
+        return None
 
 
 def update_naver_index():
