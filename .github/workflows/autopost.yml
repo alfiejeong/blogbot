@@ -34,6 +34,7 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           # 검토 큐 모드 (값을 1로 두면 draft로 저장, 빈 값/제거하면 자동 발행)
           PUBLISH_AS_DRAFT: ${{ vars.PUBLISH_AS_DRAFT }}
         run: python autonomous_issue_bot.py
