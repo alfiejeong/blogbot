@@ -388,15 +388,18 @@ def discover_trending_places_from_blogs(d_df, target=3):
 def build_keyword_pool(d_df):
     """
     트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견.
-    풀을 충분히 크게 가져가서 강한 필터 통과 후에도 MAX_POSTS_PER_RUN 채우게.
+    풀 크기 21→12 축소 (정두릅 결정 2026-05: Gemini quota 절감).
+    - 트렌드는 사건사고·동명이인 필터 후 발행 가능 비율 낮음 → 5개로 제한
+    - 거지주차 시드가 발행률 가장 높음 → 5개 유지
+    - 블로그 트렌딩은 사진 없는 신상 비율 높음 → 2개로 축소
     """
     pool = []
-    # 1) 구글 트렌드 RSS 16개 — 속보·연예·스포츠
-    pool.extend(get_google_trends())
-    # 2) 거지주차 DB 시드 6개 — 인기 동네 × 다양한 접미사 (시즌·요일 보강)
-    pool.extend(get_seed_keywords_from_parking_db(d_df, n=6))
-    # 3) 네이버 블로그 트렌딩 5개 — Gemini가 신상 가게 자동 발견
-    pool.extend(discover_trending_places_from_blogs(d_df, target=5))
+    # 1) 구글 트렌드 RSS — 발행 가능 비율 낮아 보수적
+    pool.extend(get_google_trends()[:5])
+    # 2) 거지주차 DB 시드 — 발행률 가장 높은 핵심 풀
+    pool.extend(get_seed_keywords_from_parking_db(d_df, n=5))
+    # 3) 네이버 블로그 트렌딩 — Gemini가 신상 가게 자동 발견 (보수적)
+    pool.extend(discover_trending_places_from_blogs(d_df, target=2))
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
@@ -865,6 +868,35 @@ def heuristic_is_place(kw):
 
 
 def classify_keyword(kw):
+    # ━━━ 0순위: 휴리스틱 단언 — 명확하면 Gemini 호출 스킵해 quota 절약 ━━━
+    # (정두릅 결정 2026-05: Gemini free tier 한도 빠듯해 호출 수 절감)
+    if heuristic_is_sports(kw):
+        log(f"   ⚡ 휴리스틱 단언: {kw} → sports (Gemini 스킵)")
+        return {
+            "category": "sports", "region": None,
+            "image_queries": [f"{kw}", "korean sports stadium", "match action shot", "athlete celebration"],
+            "is_person": False, "is_brand_or_show": False,
+        }
+    if heuristic_is_entertainment(kw):
+        log(f"   ⚡ 휴리스틱 단언: {kw} → entertainment (Gemini 스킵)")
+        return {
+            "category": "entertainment", "region": None,
+            "image_queries": [f"{kw}", "kpop stage performance", "korean drama scene", "tv show set"],
+            "is_person": False, "is_brand_or_show": True,
+        }
+    h_place = heuristic_is_place(kw)
+    if h_place is True:
+        # 키워드 앞 부분에서 지역명 추출 (예: "양천 데이트 코스" → "양천")
+        region_match = re.match(r"^([가-힣]{2,5}(?:구|동)?)\s", kw)
+        region = region_match.group(1) if region_match else None
+        log(f"   ⚡ 휴리스틱 단언: {kw} → hotspot region={region} (Gemini 스킵)")
+        return {
+            "category": "hotspot", "region": region,
+            "image_queries": [f"{kw}", "korean restaurant interior", "cafe seoul", "popular hotspot"],
+            "is_person": False, "is_brand_or_show": False,
+        }
+
+    # ━━━ 1순위: Gemini 분류 (휴리스틱 모호한 경우만) ━━━
     prompt = f"""한국 트렌드 키워드 "{kw}"를 분석해. 오직 아래 JSON만. 코드블록 금지.
 
 {{
@@ -2063,26 +2095,32 @@ def filter_images_by_vision(pool, kw, category):
     # 강한 출처: 캡션·OG 등으로 이미 검증됨 → Vision 실패해도 통과
     # 약한 출처: 일반 검색 결과 → Vision 실패 시 거부 (무관 이미지 위험)
     STRONG_SOURCES = {"press", "naver_local_og", "naver_local_body", "blog_og", "blog_body"}
+    skipped_strong = 0
     for img in pool:
         url = img.get("url", "")
         source = img.get("source", "unknown")
         if "picsum.photos" in url:
             accepted.append(img)
             continue
+        # ━━ 강한 출처는 Vision 호출 자체를 스킵 (어차피 실패해도 통과시킴) ━━
+        # 정두릅 결정 2026-05: Gemini quota 절감용. 호출 회당 3~10회 → 0~2회로.
+        if source in STRONG_SOURCES:
+            accepted.append(img)
+            skipped_strong += 1
+            continue
+        # 약한 출처(wikimedia/wikipedia 등)만 Vision으로 검증
         score = verify_image_with_vision(url, kw, category)
         credit_short = (img.get("credit", "") or "")[:40]
         if score is None:
-            # Vision 실패 — 출처 신뢰도로 결정
-            if source in STRONG_SOURCES:
-                accepted.append(img)
-                log(f"   ⚠️ Vision 실패, 강한 출처({source})라 통과: {credit_short}")
-            else:
-                log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
+            # 약한 출처가 Vision 실패면 거부 (무관 이미지 위험)
+            log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
         elif score >= threshold:
             accepted.append(img)
             log(f"   ✓ Vision OK ({score}/10): {credit_short}")
         else:
             log(f"   ✗ Vision 거부 ({score}/10): {credit_short}")
+    if skipped_strong:
+        log(f"   ⚡ 강한 출처 {skipped_strong}장 Vision 스킵 (quota 절약)")
     return accepted
 
 
