@@ -441,6 +441,14 @@ def discover_trending_places_from_blogs(d_df, target=3):
 - 가게 이름이 분명히 보일 때만. 추측 금지.
 - 광고·홍보·일반 후기는 제외 (예: "맛집 추천", "카페 베스트10" 같은 일반 키워드 X)
 - 음식점·카페·베이커리·팝업 등 핫플 성격 가진 것만
+- **★ 전국 프랜차이즈/체인점 절대 제외 ★** — 예: 애슐리퀸즈, 빕스, 아웃백, 스타벅스, 투썸플레이스,
+  이디야, 백다방, 더벤티, 메가커피, 컴포즈커피, 폴바셋, 할리스, 탐앤탐스, 파리바게뜨, 뚜레쥬르,
+  설빙, 배스킨라빈스, 던킨, 크리스피크림, 노브랜드버거, 맘스터치, 롯데리아, 버거킹, 맥도날드,
+  KFC, 파파존스, 도미노피자, 피자헛, 미스터피자, 본죽, 본도시락, 한솥, 김밥천국, 김가네,
+  교촌치킨, BHC, 굽네치킨, BBQ, 호식이두마리치킨, 페리카나, 처갓집, 네네치킨, 굽네, 또래오래,
+  하남돼지집, 매드포갈릭, 매드포치킨, 더본코리아 계열 등.
+  → 동네 이름 + 프랜차이즈명 조합("대학로 애슐리퀸즈" 같은 것)도 제외. 화제성 없음.
+- 독립 가게/신상/특이한 가게만 (해당 동네에서만 화제가 되는 곳).
 - 중복 제거
 - 결과는 5개 이내, JSON 배열만 출력 (다른 설명 X)
 
@@ -461,6 +469,25 @@ def discover_trending_places_from_blogs(d_df, target=3):
             if not isinstance(keywords, list):
                 return []
             picked = [k.strip() for k in keywords if k and isinstance(k, str)][:target]
+            # 추가 안전망: Gemini가 깜빡하고 프랜차이즈 포함시킨 경우 후처리로 제거
+            FRANCHISE_BLACKLIST = {
+                "애슐리", "애슐리퀸즈", "빕스", "아웃백", "스타벅스", "투썸", "투썸플레이스",
+                "이디야", "백다방", "더벤티", "메가커피", "메가엠지씨커피", "컴포즈", "컴포즈커피",
+                "폴바셋", "할리스", "탐앤탐스", "파리바게뜨", "뚜레쥬르", "설빙",
+                "배스킨라빈스", "배라", "던킨", "크리스피크림", "노브랜드버거", "맘스터치",
+                "롯데리아", "버거킹", "맥도날드", "맥날", "kfc", "파파존스", "도미노피자",
+                "피자헛", "미스터피자", "본죽", "본도시락", "한솥", "김밥천국", "김가네",
+                "교촌치킨", "교촌", "bhc", "굽네치킨", "굽네", "bbq", "처갓집", "네네치킨", "또래오래",
+                "하남돼지집", "매드포갈릭", "매드포치킨",
+            }
+            def _is_franchise(kw_str):
+                low = kw_str.lower()
+                return any(f.lower() in low for f in FRANCHISE_BLACKLIST)
+            filtered = [k for k in picked if not _is_franchise(k)]
+            if len(filtered) < len(picked):
+                removed = [k for k in picked if k not in filtered]
+                log(f"   🚫 프랜차이즈 제거: {removed}")
+            picked = filtered
             log(f"📰 블로그 트렌딩 자동 발견 {len(picked)}개: {picked}")
             return picked
         except Exception as e:
@@ -4144,10 +4171,17 @@ def run_bot():
             images_for_hero = images
             if info["category"] in ("hotspot", "restaurant"):
                 blog_imgs = [im for im in images if im.get("source") in ("blog_body", "blog_og")]
+                press_imgs = [im for im in images if im.get("source") == "press"]
+                # blog 이미지가 있으면 hero 우선
                 if blog_imgs:
                     non_blog = [im for im in images if im.get("source") not in ("blog_body", "blog_og")]
                     images_for_hero = blog_imgs + non_blog
                     log(f"   🖼 hero 재정렬: blog 이미지 {len(blog_imgs)}장 우선 (지도 사진 회피)")
+                # blog가 없고 press도 없으면 hero가 naver_local_og가 됨 → 지도 사진 위험
+                # 정두릅 결정 2026-05: 핫플/맛집에 blog/press hero 없으면 발행 거부
+                elif not press_imgs:
+                    log(f"   ⛔ 핫플/맛집 hero 후보가 naver_local_og(지도 위험)뿐 — 발행 스킵")
+                    continue
             hero_img = images_for_hero[0]
             body_imgs = images_for_hero[1:] if len(images_for_hero) > 1 else []
             article_html = distribute_images(article_html, body_imgs, hero_url=hero_img.get("url"))
