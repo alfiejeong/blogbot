@@ -102,11 +102,35 @@ def _call_groq(contents, label=""):
                 "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7,
+                # 본문이 잘리지 않도록 충분히 (이전 131자 잘림 케이스 방지)
+                "max_tokens": 4000,
             },
-            timeout=30,
+            timeout=60,
         )
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"]
+
+        # JSON 응답이 기대되는 호출에 한해 Llama 응답 정제
+        # — Llama가 가끔 raw 줄바꿈(제어문자)을 JSON string 안에 넣어 호출부 파싱 깨뜨림.
+        # 여기서 strict=False로 한 번 파싱 후 깔끔히 다시 dumps해서 호출부 영향 없게.
+        if any(x in label for x in ("classify", "post", "naver-rewrite", "discover-places")):
+            try:
+                cleaned = text
+                # 코드블록 마커 제거 (Llama가 ```json``` 감싸는 경우 있음)
+                cleaned = re.sub(r"```(?:json)?", "", cleaned).strip("`").strip()
+                # 첫 JSON 객체/배열 영역만 추출
+                m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+                if m:
+                    cleaned = m.group(1)
+                # \t \n \r 외 제어문자 제거
+                cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
+                # strict=False면 string value 안의 raw 줄바꿈 허용
+                data = json.loads(cleaned, strict=False)
+                # 호출부에서 안전하게 다시 파싱하도록 깔끔히 dumps
+                text = json.dumps(data, ensure_ascii=False)
+            except Exception as je:
+                log(f"   Groq JSON 정제 실패 ({label}): {str(je)[:80]}")
+                # 정제 실패 시 원본 그대로 반환 (호출부 폴백 시도)
         return SimpleNamespace(text=text)
     except Exception as e:
         log(f"   Groq 폴백도 실패 ({label}): {str(e)[:80]}")
@@ -450,18 +474,18 @@ def discover_trending_places_from_blogs(d_df, target=3):
 def build_keyword_pool(d_df):
     """
     트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견.
-    풀 크기 21→12 축소 (정두릅 결정 2026-05: Gemini quota 절감).
-    - 트렌드는 사건사고·동명이인 필터 후 발행 가능 비율 낮음 → 5개로 제한
-    - 거지주차 시드가 발행률 가장 높음 → 5개 유지
-    - 블로그 트렌딩은 사진 없는 신상 비율 높음 → 2개로 축소
+    정두릅 결정 2026-05 (품질 우선 재조정):
+    - 연예·방송·스포츠 트렌드 글 품질 양호 → 트렌드 비중 ↑ (5 → 8)
+    - 거지주차 일반 카테고리 시드는 묶음 글 위험 → 대폭 축소 (5 → 2)
+    - 블로그 트렌딩은 단일 가게명이라 안전 → 유지·소폭 확대 (2 → 4)
     """
     pool = []
-    # 1) 구글 트렌드 RSS — 발행 가능 비율 낮아 보수적
-    pool.extend(get_google_trends()[:5])
-    # 2) 거지주차 DB 시드 — 발행률 가장 높은 핵심 풀
-    pool.extend(get_seed_keywords_from_parking_db(d_df, n=5))
-    # 3) 네이버 블로그 트렌딩 — Gemini가 신상 가게 자동 발견 (보수적)
-    pool.extend(discover_trending_places_from_blogs(d_df, target=2))
+    # 1) 구글 트렌드 RSS — 연예/방송/스포츠가 핵심. 일부 사건사고 자동 스킵돼도 OK
+    pool.extend(get_google_trends()[:8])
+    # 2) 거지주차 DB 일반 카테고리 시드 — 묶음 글 위험으로 최소화
+    pool.extend(get_seed_keywords_from_parking_db(d_df, n=2))
+    # 3) 네이버 블로그 트렌딩 — 단일 가게명 형식이라 단일 가게 글 만들기 좋음
+    pool.extend(discover_trending_places_from_blogs(d_df, target=4))
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
@@ -2648,10 +2672,23 @@ def generate_post(kw, info, news_ctx=""):
         )
         prompt = f"""너는 한국의 {role}야. 키워드 "{kw}"로 모바일 최적화 블로그 글을 써줘.
 {ctx_block}
+[★ 절대 원칙 — 단일 가게 집중 ★]
+- 이 글은 **단 한 가게**만 다룬다. 여러 가게 비교/추천/리스트 형식 절대 금지.
+- 뉴스 컨텍스트와 키워드를 보고 **딱 한 곳의 화제 가게**를 골라 그 가게에만 집중.
+- 키워드가 "X구 디저트", "Y동 카페", "Z 팝업스토어" 같은 일반 카테고리면:
+  → 뉴스 컨텍스트나 자료에서 **가장 명확히 한 곳 지목된 가게**를 골라서 그 가게로 글 작성
+  → 명확히 한 가게가 지목 안 되면 **"insufficient"** 만 출력하고 종료 (가짜·억지 글 X)
+- "이외에도 ~", "또 다른 곳으로는 ~", "추천 리스트", "Top N" 류 표현 전면 금지.
+- **가게 이름·메뉴·특징·위치를 담백하게.** 화려한 수식어 X.
+
+[★ 절대 원칙 — 추측/조작 금지 ★]
+- 뉴스 컨텍스트에 없는 정보는 절대 지어내지 마라.
+- 가게가 화제인 이유를 뉴스에서 확인 못 하면 "지금 핫한 가게"라고 두루뭉술 쓰지 말고 "insufficient" 출력.
+
 [목표]
 - 정보·후기 톤. 광고 글처럼 보이면 안 됨.
 - 본문 끝에 별도 "주차 팁" 박스가 따로 들어가니, 본문에는 주차 얘기 한 줄만 살짝.
-- {body_focus} 같은 실용 정보 위주.
+- {body_focus} 같은 실용 정보 위주. **단 한 가게에 대한** 정보.
 
 [톤 & 분량 - 모바일 최적화 절대 원칙]
 - 친한 친구 카톡 톤: "~했더라구요", "~인 듯", "솔직히".
@@ -2698,11 +2735,19 @@ H2 헤딩 4개. 각 H2 직후에 정확히 [IMG] 한 줄.
             )
         prompt = f"""너는 한국의 트렌드 정보 블로거야. 키워드 "{kw}"로 모바일 최적화 블로그 글을 써줘.
 {ctx_block}
+[★ 절대 원칙 — 추측/조작 금지 ★]
+- 뉴스 컨텍스트에 나온 사실만 사용. 키워드와 뉴스를 억지로 연결하지 마라.
+- 키워드("{kw}")가 뉴스 컨텍스트에서 **명확히 무엇을 뜻하는지** 먼저 확인:
+  → 키워드와 뉴스가 맥락이 안 맞으면(예: "사이렌"이 노래 제목 뉴스인데 스타벅스로 푸는 식) **"insufficient"** 만 출력하고 종료.
+  → 동음이의어·중의어 키워드를 임의로 한 쪽으로 결정해서 풀지 마라.
+- 뉴스 컨텍스트에 키워드 자체에 대한 직접 설명이 5문장 미만이면 **"insufficient"** 만 출력. 어설픈 추측 글 절대 X.
+- 브랜드명·인물·상품·노래·사건을 임의로 연결해 "신곡과 ○○의 만남" 같은 가짜 스토리 만들지 마라.
+
 [목표]
 - 사람들이 "이게 왜 핫하지?" 검색 → 클릭 → 만족하고 가는 정보성 글.
 - 검색 유입 + 체류 시간 목적. 광고/홍보 단어 금지.
 - **이 키워드는 장소가 아니야. "주차", "주차장", "주차 팁" 같은 단어 절대 본문에 쓰지 말 것.**
-- **키워드 정체 확인 필수: 위 뉴스 컨텍스트를 보고 사람/제품/사건 중 무엇인지 판단. 헷갈리면 가장 많이 등장한 맥락 따라가기.**
+- **키워드 정체 확인 필수: 위 뉴스 컨텍스트를 보고 사람/제품/사건 중 무엇인지 판단. 헷갈리면 절대 추측 말고 "insufficient" 출력.**
 
 [필수 콘텐츠 — 위 뉴스 발췌만 근거로]
 1) 이게 무엇/누구인지 한 줄 (뉴스 맥락 그대로)
@@ -2755,6 +2800,11 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         # 메인 flash가 quota 막힌 상태에서 처음부터 lite 시도하면 한 단계 빨리 성공.
         res = gemini_generate(prompt, label="post", prefer_lite=True)
         txt = res.text.strip()
+        # 모델이 "insufficient" 토큰만 반환했으면 발행 거부 (정두릅 결정 2026-05:
+        # 추측 글·묶음 글 방지. 단일 가게 명확하지 않거나 키워드-뉴스 맥락 불일치 케이스)
+        if re.search(r"\binsufficient\b", txt, re.IGNORECASE):
+            log("   🚫 모델이 'insufficient' 반환 — 추측 글 위험으로 발행 거부")
+            return None, None
         txt = re.sub(r"```(?:json)?", "", txt).strip("`").strip()
         m = re.search(r"\{.*\}", txt, re.DOTALL)
         if m:
@@ -2764,6 +2814,10 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         content = (data.get("content_html") or "").strip()
         if not title or not content:
             raise ValueError("title/content 비어있음")
+        # JSON 안에 insufficient가 박혀 들어온 케이스도 추가 차단
+        if "insufficient" in (title + content).lower():
+            log("   🚫 본문에 'insufficient' 감지 — 발행 거부")
+            return None, None
     except Exception as e:
         # 재시도까지 다 실패한 503/할당량 → 헛소리 fallback 만들지 말고 스킵
         log(f"⚠️ 본문 생성 최종 실패 (재시도 포함): {str(e)[:120]}")
@@ -4084,8 +4138,18 @@ def run_bot():
 
             # ⑤ 이미지 배치
             #   - 이미지 1장만 있으면 인트로용으로만 쓰고 본문 [IMG] 토큰은 빈 문자열로 정리
-            hero_img = images[0]
-            body_imgs = images[1:] if len(images) > 1 else []
+            # ★ 핫플/맛집: hero에 네이버 지역 OG(naver_local_og)가 오면 지도 캡처일 위험 있음
+            #   → blog_body/blog_og(블로그 본문 사진)를 hero 우선으로 재정렬
+            #   (정두릅 결정 2026-05: 지도 사진 hero 신뢰도 ↓ 사고 방지)
+            images_for_hero = images
+            if info["category"] in ("hotspot", "restaurant"):
+                blog_imgs = [im for im in images if im.get("source") in ("blog_body", "blog_og")]
+                if blog_imgs:
+                    non_blog = [im for im in images if im.get("source") not in ("blog_body", "blog_og")]
+                    images_for_hero = blog_imgs + non_blog
+                    log(f"   🖼 hero 재정렬: blog 이미지 {len(blog_imgs)}장 우선 (지도 사진 회피)")
+            hero_img = images_for_hero[0]
+            body_imgs = images_for_hero[1:] if len(images_for_hero) > 1 else []
             article_html = distribute_images(article_html, body_imgs, hero_url=hero_img.get("url"))
             # Yoast Readability 향상: 수동태→능동태, 긴 문장 분할, 경고
             article_html = improve_readability(article_html)
@@ -4106,7 +4170,8 @@ def run_bot():
             full_html = wrap_post_for_mobile(intro_html + article_html + trailer)
 
             # ⑦ 피처드 이미지 업로드 + 카테고리 매핑 + 자동 태그 + 발행
-            featured_id = upload_featured_image(images[0])
+            # hero 재정렬 결과(images_for_hero[0])를 사용 — 핫플/맛집 지도 사진 회피
+            featured_id = upload_featured_image(images_for_hero[0])
             if not featured_id:
                 log("   ⛔ 대표 이미지 업로드 실패 — 발행 스킵 (대표 이미지 무조건 보장)")
                 continue
