@@ -1969,10 +1969,21 @@ def extract_first_body_image(url):
             "변호사", "법무법인", "법률", "대출", "보험", "재테크", "투자",
             # 일반 공지·SNS 배너
             "안내드립니다", "공지사항", "구독하기", "팔로우",
+            # 이모티콘·스티커·캐릭터·지도 (정두릅 결정 2026-05: 가게 사진 외 노이즈 차단)
+            "이모티콘", "스티커", "이모지", "이모지티콘",
+            "캐릭터", "일러스트", "그림", "삽화", "만화", "웹툰",
+            "지도", "지도 이미지", "약도", "위치 안내",
         }
         AD_URL_PATTERNS = (
             "/ad/", "/ads/", "/banner/", "/promotion/", "/event/", "/notice/",
             "googleads", "doubleclick", "adservice",
+            # 이모티콘·스티커 패턴
+            "/sticker/", "/stickers/", "/emoticon/", "/emoticons/", "/emoji/",
+            "storep-phinf",       # 네이버 스티커 CDN
+            "ogq-cdn",            # OGQ 스티커
+            # 지도 패턴
+            "map.pstatic", "ldb-phinf.pstatic", "/map/", "mapimg",
+            "kakaocdn.net/relay/map", "daumcdn.net/local/map",
         )
 
         def _is_ad_image(img_tag, src_lower):
@@ -4254,6 +4265,10 @@ def run_bot():
                     continue
             hero_img = images_for_hero[0]
             body_imgs = images_for_hero[1:] if len(images_for_hero) > 1 else []
+            # 핫플/맛집은 body에서도 naver_local_og 제외 — 가게 OG에 지도 사진 섞일 위험
+            # (정두릅 결정 2026-05: 본문에도 지도 사진 금지)
+            if info["category"] in ("hotspot", "restaurant"):
+                body_imgs = [im for im in body_imgs if im.get("source") != "naver_local_og"]
             article_html = distribute_images(article_html, body_imgs, hero_url=hero_img.get("url"))
             # Yoast Readability 향상: 수동태→능동태, 긴 문장 분할, 경고
             article_html = improve_readability(article_html)
