@@ -518,18 +518,18 @@ def discover_trending_places_from_blogs(d_df, target=3):
 def build_keyword_pool(d_df):
     """
     트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견.
-    정두릅 결정 2026-05 (품질 우선 재조정):
-    - 연예·방송·스포츠 트렌드 글 품질 양호 → 트렌드 비중 ↑ (5 → 8)
-    - 거지주차 일반 카테고리 시드는 묶음 글 위험 → 대폭 축소 (5 → 2)
-    - 블로그 트렌딩은 단일 가게명이라 안전 → 유지·소폭 확대 (2 → 4)
+    정두릅 결정 2026-05 (품질 우선 + 핫플/맛집 비중 대폭 축소):
+    - 연예·방송·스포츠 글 품질 좋음 → 트렌드 비중 최대화 (8 → 10)
+    - 핫플/맛집은 1/10 수준으로 축소 (사용자 지시: 묶음 글·무관 이미지·낮은 품질 이슈)
+      → 거지주차 시드 2 → 1, 블로그 트렌딩 4 → 1. 핫플/맛집 합쳐 2개만.
     """
     pool = []
-    # 1) 구글 트렌드 RSS — 연예/방송/스포츠가 핵심. 일부 사건사고 자동 스킵돼도 OK
-    pool.extend(get_google_trends()[:8])
-    # 2) 거지주차 DB 일반 카테고리 시드 — 묶음 글 위험으로 최소화
-    pool.extend(get_seed_keywords_from_parking_db(d_df, n=2))
-    # 3) 네이버 블로그 트렌딩 — 단일 가게명 형식이라 단일 가게 글 만들기 좋음
-    pool.extend(discover_trending_places_from_blogs(d_df, target=4))
+    # 1) 구글 트렌드 RSS — 연예/방송/스포츠가 핵심. 비중 최대화
+    pool.extend(get_google_trends()[:10])
+    # 2) 거지주차 DB 일반 카테고리 시드 — 1개만 (실험적으로 살려둠)
+    pool.extend(get_seed_keywords_from_parking_db(d_df, n=1))
+    # 3) 네이버 블로그 트렌딩 — 1개만 (단일 가게 발견 가능성 가장 높지만 보수적)
+    pool.extend(discover_trending_places_from_blogs(d_df, target=1))
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
@@ -1954,6 +1954,46 @@ def extract_first_body_image(url):
             soup
         )
 
+        # 광고·협찬·공지·무관 이미지 차단용 키워드
+        # (정두릅 결정 2026-05: 천원 아침밥 글에 병원 원장 이미지, 오신돼지갈비 글에
+        #  미블 협찬 안내 이미지 박힌 사고 방지)
+        AD_KEYWORDS = {
+            # 협찬·체험단 플랫폼
+            "미블", "mible", "체험단", "체험 단", "리뷰단", "원고료", "협찬", "후원받",
+            "제공받았", "제공 받았", "원고 작성", "원고작성", "ad)", "(ad",
+            # 광고·이벤트·할인
+            "광고", "프로모션", "promotion", "할인", "쿠폰", "이벤트 안내",
+            "신규회원", "신규 회원", "회원 가입", "회원가입",
+            # 무관 카테고리 (병원·법무·금융 등)
+            "병원", "원장", "닥터", "한의원", "치과", "성형", "피부과", "내과",
+            "변호사", "법무법인", "법률", "대출", "보험", "재테크", "투자",
+            # 일반 공지·SNS 배너
+            "안내드립니다", "공지사항", "구독하기", "팔로우",
+        }
+        AD_URL_PATTERNS = (
+            "/ad/", "/ads/", "/banner/", "/promotion/", "/event/", "/notice/",
+            "googleads", "doubleclick", "adservice",
+        )
+
+        def _is_ad_image(img_tag, src_lower):
+            # URL 패턴
+            if any(p in src_lower for p in AD_URL_PATTERNS):
+                return True
+            # alt/title 텍스트
+            alt = (img_tag.get("alt", "") + " " + img_tag.get("title", "")).lower()
+            if any(kw in alt for kw in AD_KEYWORDS):
+                return True
+            # 주변 텍스트 (부모/이전 형제) — 광고 안내가 이미지 옆에 있을 가능성
+            try:
+                parent = img_tag.parent
+                if parent:
+                    nearby = parent.get_text(" ", strip=True)[:300]
+                    if any(kw in nearby for kw in AD_KEYWORDS):
+                        return True
+            except Exception:
+                pass
+            return False
+
         for img in main.find_all("img"):
             src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
             if not src:
@@ -1982,6 +2022,9 @@ def extract_first_body_image(url):
                     continue
             except Exception:
                 pass
+            # ★ 광고·협찬·공지·무관 이미지 차단 ★
+            if _is_ad_image(img, sl):
+                continue
             return src
     except Exception as e:
         log(f"   본문 이미지 추출 실패 {url[:50]}: {str(e)[:60]}")
@@ -2739,9 +2782,21 @@ def generate_post(kw, info, news_ctx=""):
 - "이외에도 ~", "또 다른 곳으로는 ~", "추천 리스트", "Top N" 류 표현 전면 금지.
 - **가게 이름·메뉴·특징·위치를 담백하게.** 화려한 수식어 X.
 
-[★ 절대 원칙 — 추측/조작 금지 ★]
+[★ 절대 원칙 — 키워드와 가게 일치 검증 ★]
+- 키워드가 "강북 냉면"인데 뉴스에서 잡힌 가게가 카페·오마카세면 → "insufficient" 출력.
+- 키워드 음식 카테고리(냉면/돈까스/베이글 등)와 가게가 실제 그 음식을 하는지 확인.
+- 음식 카테고리 안 맞으면 절대 글 만들지 마라.
+
+[★ 절대 원칙 — 추측/조작 금지 + 구체 정보 필수 ★]
 - 뉴스 컨텍스트에 없는 정보는 절대 지어내지 마라.
 - 가게가 화제인 이유를 뉴스에서 확인 못 하면 "지금 핫한 가게"라고 두루뭉술 쓰지 말고 "insufficient" 출력.
+- **다음 정보 중 최소 2개 이상이 뉴스 컨텍스트에 있어야 글 작성 허용**:
+  ① 가게의 화제 이유 (오픈 시점·메뉴·미디어 노출·이슈)
+  ② 시그니처 메뉴 또는 가격
+  ③ 영업 시간·웨이팅·예약 방법
+  ④ 매장 위치·접근성 구체 (역 도보 N분 등)
+  ⑤ 손님 반응·후기 핵심 한 줄
+- 2개 미만이면 "insufficient" 출력. 일반론으로 채우지 마라.
 
 [목표]
 - 정보·후기 톤. 광고 글처럼 보이면 안 됨.
