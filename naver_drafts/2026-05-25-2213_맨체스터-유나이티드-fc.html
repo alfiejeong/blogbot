@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>맨유, 요즘 폼 미쳤다던데? 이유가 뭐지?</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', sans-serif;
+         max-width: 720px; margin: 0 auto; padding: 16px; line-height: 1.7;
+         color: #222; word-break: keep-all; }
+  h1 { font-size: 22px; margin-top: 28px; }
+  p { font-size: 16px; }
+  .actions { position: sticky; top: 0; background: #fff;
+              padding: 12px 0; border-bottom: 1px solid #eee; z-index: 10; }
+  .btn { display: block; width: 100%; padding: 16px; margin: 8px 0;
+          border: 0; border-radius: 12px; font-size: 16px; font-weight: 600;
+          cursor: pointer; text-align: center; text-decoration: none; }
+  .btn-title { background: #4a90e2; color: #fff; }
+  .btn-body { background: #ff5722; color: #fff; }
+  .btn-tags { background: #ffa726; color: #fff; }
+  .btn-naver { background: #03c75a; color: #fff; }
+  .btn.copied { background: #2ecc71 !important; }
+  .meta { background:#f6f6f6; padding:10px; border-radius:8px;
+           font-size:13px; color:#666; margin-top: 20px; }
+  .tags-box { margin-top:18px; padding:14px; background:#fff5e6;
+               border-radius:8px; font-size:14px; }
+  .preview-title { background:#eef5ff; padding:12px; border-radius:8px;
+                    margin: 12px 0; font-weight: 700; }
+  .help { background:#e8f4ff; padding:12px; border-radius:8px;
+           font-size:13px; margin-bottom:14px; line-height: 1.6; }
+  .img-bank { margin-top: 24px; padding: 16px; background: #f9f9f9;
+               border-radius: 12px; border: 1px solid #eee; }
+  .bank-h3 { font-size: 15px; margin: 0 0 6px; color: #444; }
+  .bank-desc { font-size: 13px; color: #666; line-height: 1.5; margin: 0 0 12px; }
+  .bank-item { margin: 14px 0; }
+  .bank-num { font-size: 12px; color: #999; margin-bottom: 4px; font-weight: 600; }
+  .bank-item img { max-width: 100%; height: auto;
+                    border-radius: 8px; display: block; }
+</style></head><body>
+
+
+
+<div class="help">
+✅ <b>PC 웹에서</b><br>
+1. <b>본문 복사</b> 탭 → 네이버 글쓰기 본문에 붙여넣기 (이미지 자동 첨부)<br>
+2. <b>제목 복사</b> 탭 → 네이버 제목 칸에 붙여넣기<br>
+3. <b>태그 복사</b> 탭 → 네이버 태그 칸에 붙여넣기<br>
+4. 카테고리: <b>스포츠</b> 선택 후 발행<br>
+<br>
+📱 <b>네이버 블로그 앱(모바일)에서는</b> 외부 URL 이미지를 인식하지 못합니다.
+본문 복사·붙여넣기 후, 페이지 아래 <b>📥 모바일용 이미지</b> 섹션의 사진을 길게 눌러 저장한 다음, 앱의 사진 첨부에서 갤러리로 첨부하세요.
+</div>
+
+<div class="actions">
+  <button class="btn btn-body" onclick="copyBodyHTML(this)">📋 본문 복사 (이미지 포함)</button>
+  <button class="btn btn-title" onclick="copyTextFromId(this, 'data-title')">📌 제목 복사</button>
+  <button class="btn btn-tags" onclick="copyTextFromId(this, 'data-tags')">🏷 태그 복사</button>
+  <a class="btn btn-naver" href="https://blog.naver.com/whyhotmagazine?Redirect=Write" target="_blank">🚀 네이버 블로그 글쓰기 열기</a>
+</div>
+
+<div class="preview-title">제목: <span id="data-title">맨유, 요즘 폼 미쳤다던데? 이유가 뭐지?</span></div>
+
+<div id="data-body">
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">맨체스터 유나이티드 FC 검색량이 심상치 않다는데, 대체 요즘 왜 이렇게 핫한 걸까요? 👀 그 이유, 핵심만 빠르게 알려드릴게요!</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">🔥 맨유, 무슨 일 있었나</h3>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">최근 맨체스터 유나이티드의 경기력이 눈에 띄게 좋아졌어요. 카세미루가 팀을 떠나고 새로운 선수들이 합류하면서 팀 분위기가 완전히 달라졌다고 하네요.</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:20px 0;text-align:center;"><img src="https://whyhot.kr/wp-content/uploads/2026/05/press_1779747147_769.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="맨유, 요즘 폼 미쳤다던데? 이유가 뭐지?"></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">📊 맨유, 기록 보니?</h3>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">최근 몇몇 경기에서 맨유가 정말 좋은 성적을 거두고 있답니다. 특히 젊은 미드필더 알렉스 스콧의 합류가 예상되는데, 카세미루의 빈자리를 훌륭하게 채워줄 것으로 기대돼요.</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">💬 팬들은 어떻게 생각할까</h3>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">맨유 팬들은 새로운 시즌을 앞두고 팀이 어떻게 준비하고 있는지 면밀히 지켜보고 있어요. 다음 시즌 맨유가 어떤 놀라운 활약을 펼칠지 벌써부터 기대가 모아지고 있답니다.</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">📅 다음 경기는 언제?</h3>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">맨체스터 유나이티드의 다음 경기가 곧 다가올 예정이에요. 새로운 선수들이 팀에 얼마나 잘 녹아들고, 팀의 전체적인 폼이 어떻게 유지될지 지켜보는 것이 이번 시즌의 관전 포인트가 될 것 같습니다.</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#fff5e6;padding:14px 16px;border-radius:10px;margin:20px 0;font-weight:600;color:#b35e00;line-height:1.6;">▶ 지금의 맨유, 역대급 시즌을 예고하는 걸까요?</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">이 블로그는</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">거지주차.com</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">이 운영하는 트렌드 매거진입니다 ✨</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">📍 자세한 글:</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://whyhot.kr" style="color:#1f6feb;text-decoration:underline;">https://whyhot.kr</a></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">🚗 주차 정보:</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://거지주차.com" style="color:#1f6feb;text-decoration:underline;">https://거지주차.com</a></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+</div>
+
+<div class="img-bank"><h3 class="bank-h3">📥 모바일용 이미지 (꾸욱 눌러 저장)</h3><p class="bank-desc">네이버 블로그 앱은 외부 URL 이미지를 인식하지 못합니다. 본문 복사·붙여넣기 후 아래 사진을 길게 눌러 저장한 다음, 네이버 앱의 사진 첨부에서 갤러리로 첨부하세요.</p><div class="bank-item"><div class="bank-num">1 / 1 · 꾸욱 눌러 저장</div><img src="https://whyhot.kr/wp-content/uploads/2026/05/press_1779747147_769.jpg" alt="맨유, 요즘 폼 미쳤다던데? 이유가 뭐지?"></div></div>
+
+<div class="tags-box">
+<b>태그</b>: <span id="data-tags">#오늘의이슈 #트렌드 #화제 #실시간이슈 #와이핫 #맨체스터유나이티드 #EPL #프리미어리그 #축구 #프리미어리그이슈</span>
+</div>
+
+<div class="meta">
+카테고리: 스포츠 · 원본: https://whyhot.kr/?p=2404 · 2026-05-25 22:13
+</div>
+
+<script>
+const BODY_HTML = '<p style="margin:14px 0;line-height:1.75;font-size:16px;">맨체스터 유나이티드 FC 검색량이 심상치 않다는데, 대체 요즘 왜 이렇게 핫한 걸까요? 👀 그 이유, 핵심만 빠르게 알려드릴게요!</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">🔥 맨유, 무슨 일 있었나</h3>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">최근 맨체스터 유나이티드의 경기력이 눈에 띄게 좋아졌어요. 카세미루가 팀을 떠나고 새로운 선수들이 합류하면서 팀 분위기가 완전히 달라졌다고 하네요.</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:20px 0;text-align:center;"><img src="https://whyhot.kr/wp-content/uploads/2026/05/press_1779747147_769.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="맨유, 요즘 폼 미쳤다던데? 이유가 뭐지?"></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">📊 맨유, 기록 보니?</h3>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">최근 몇몇 경기에서 맨유가 정말 좋은 성적을 거두고 있답니다. 특히 젊은 미드필더 알렉스 스콧의 합류가 예상되는데, 카세미루의 빈자리를 훌륭하게 채워줄 것으로 기대돼요.</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">💬 팬들은 어떻게 생각할까</h3>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">맨유 팬들은 새로운 시즌을 앞두고 팀이 어떻게 준비하고 있는지 면밀히 지켜보고 있어요. 다음 시즌 맨유가 어떤 놀라운 활약을 펼칠지 벌써부터 기대가 모아지고 있답니다.</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">📅 다음 경기는 언제?</h3>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">맨체스터 유나이티드의 다음 경기가 곧 다가올 예정이에요. 새로운 선수들이 팀에 얼마나 잘 녹아들고, 팀의 전체적인 폼이 어떻게 유지될지 지켜보는 것이 이번 시즌의 관전 포인트가 될 것 같습니다.</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#fff5e6;padding:14px 16px;border-radius:10px;margin:20px 0;font-weight:600;color:#b35e00;line-height:1.6;">▶ 지금의 맨유, 역대급 시즌을 예고하는 걸까요?</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">이 블로그는</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">거지주차.com</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">이 운영하는 트렌드 매거진입니다 ✨</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">📍 자세한 글:</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://whyhot.kr" style="color:#1f6feb;text-decoration:underline;">https://whyhot.kr</a></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">🚗 주차 정보:</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://거지주차.com" style="color:#1f6feb;text-decoration:underline;">https://거지주차.com</a></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>';
+const BODY_PLAIN = document.getElementById('data-body').innerText;
+
+async function copyBodyHTML(btn) {
+  const html = BODY_HTML;
+  const text = BODY_PLAIN;
+  const original = btn.textContent;
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      const data = [new ClipboardItem({
+        'text/html': new Blob([html], {type: 'text/html'}),
+        'text/plain': new Blob([text], {type: 'text/plain'})
+      })];
+      await navigator.clipboard.write(data);
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+    btn.textContent = '✓ 복사됨! 네이버 본문에 붙여넣기';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }, 3000);
+  } catch (e) {
+    alert('복사 실패: ' + e.message + '\n수동으로 본문 영역을 길게 눌러 복사하세요.');
+  }
+}
+
+async function copyTextFromId(btn, id) {
+  const text = document.getElementById(id).textContent;
+  const original = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✓ 복사됨!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }, 2000);
+  } catch (e) {
+    alert('복사 실패: ' + e.message);
+  }
+}
+</script>
+
+</body></html>
