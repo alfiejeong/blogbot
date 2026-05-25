@@ -457,7 +457,8 @@ def discover_trending_places_from_blogs(d_df, target=3):
 - 형식: "동네 가게이름" 또는 "가게이름 동네" (예: "성수동 어니언", "한남동 노티드")
 - 가게 이름이 분명히 보일 때만. 추측 금지.
 - 광고·홍보·일반 후기는 제외 (예: "맛집 추천", "카페 베스트10" 같은 일반 키워드 X)
-- 음식점·카페·베이커리·팝업 등 핫플 성격 가진 것만
+- **★ 절대 제외 ★**: 팝업스토어, 페스티벌, 축제, 임팩트, 단기 이벤트 (시기 민감해서 종료 후 다루는 사고)
+- 음식점·카페·베이커리만 (상시 영업하는 곳)
 - **★ 전국 프랜차이즈/체인점 절대 제외 ★** — 예: 애슐리퀸즈, 빕스, 아웃백, 스타벅스, 투썸플레이스,
   이디야, 백다방, 더벤티, 메가커피, 컴포즈커피, 폴바셋, 할리스, 탐앤탐스, 파리바게뜨, 뚜레쥬르,
   설빙, 배스킨라빈스, 던킨, 크리스피크림, 노브랜드버거, 맘스터치, 롯데리아, 버거킹, 맥도날드,
@@ -517,19 +518,27 @@ def discover_trending_places_from_blogs(d_df, target=3):
 
 def build_keyword_pool(d_df):
     """
-    트렌드 RSS + 거지주차 DB 시드 + 네이버 블로그 트렌딩 자동 발견.
-    정두릅 결정 2026-05 (품질 우선 + 핫플/맛집 비중 대폭 축소):
-    - 연예·방송·스포츠 글 품질 좋음 → 트렌드 비중 최대화 (8 → 10)
-    - 핫플/맛집은 1/10 수준으로 축소 (사용자 지시: 묶음 글·무관 이미지·낮은 품질 이슈)
-      → 거지주차 시드 2 → 1, 블로그 트렌딩 4 → 1. 핫플/맛집 합쳐 2개만.
+    트렌드 RSS + 네이버 블로그 트렌딩 자동 발견.
+    정두릅 결정 2026-05 (핫플/맛집 품질 사고 다수 → 시드 자체 축소):
+    - 거지주차 일반 카테고리 시드 완전 비활성 ("X구 카페" 같은 키워드는
+      구체 가게 없어 모델이 할루시네이션·중구난방 글로 빠짐. 사례: 성북 인스타 감성,
+      양천 내추럴 와인 등)
+    - 블로그 트렌딩만 유지(단일 가게명 형식). 1개로 보수적.
+    - 팝업스토어 키워드는 시기 민감 + 종료 후 잡히는 사고 다수 → 자동 제거
     """
     pool = []
-    # 1) 구글 트렌드 RSS — 연예/방송/스포츠가 핵심. 비중 최대화
+    # 1) 구글 트렌드 RSS — 연예/방송/스포츠가 핵심
     pool.extend(get_google_trends()[:10])
-    # 2) 거지주차 DB 일반 카테고리 시드 — 1개만 (실험적으로 살려둠)
-    pool.extend(get_seed_keywords_from_parking_db(d_df, n=1))
-    # 3) 네이버 블로그 트렌딩 — 1개만 (단일 가게 발견 가능성 가장 높지만 보수적)
+    # 2) (비활성) 거지주차 DB 일반 카테고리 시드 — 일반론·할루시네이션 위험
+    # pool.extend(get_seed_keywords_from_parking_db(d_df, n=1))
+    # 3) 네이버 블로그 트렌딩 — 단일 가게명 발견 (보수적 1개)
     pool.extend(discover_trending_places_from_blogs(d_df, target=1))
+    # 4) 시기 민감 키워드 자동 제거 — 팝업/페스티벌/축제 등 종료 후 다루는 사고 차단
+    BANNED_TIME_SENSITIVE = ("팝업", "팝업스토어", "페스티벌", "축제", "임팩트", "단기 오픈")
+    before = len(pool)
+    pool = [k for k in pool if not any(b in k for b in BANNED_TIME_SENSITIVE)]
+    if len(pool) < before:
+        log(f"   🚫 시기 민감 키워드 {before - len(pool)}개 제거 (팝업/축제 등)")
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
@@ -2965,6 +2974,21 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     if h2_count < 3:
         log(f"   ⚠️ H2 헤딩 {h2_count}개만 — 글 구조 미완, 스킵")
         return None, None
+
+    # ★ 핫플/맛집: 가게명이 본문에 충분히 등장해야 (할루시네이션·중구난방 차단) ★
+    # 정두릅 결정 2026-05: 키워드 "공덕 도시의식탁" 같은 경우 가게명("도시의식탁")이
+    # 본문에 안 나오면 모델이 가게 무시하고 일반론으로 빠진 글. 발행 거부.
+    if cat in ("hotspot", "restaurant"):
+        tokens = kw.split()
+        if len(tokens) >= 2:
+            # 첫 토큰은 지역명일 가능성, 나머지가 가게명/메뉴
+            store_part = " ".join(tokens[1:]).strip()
+            plain_content = re.sub(r"<[^>]+>", "", content)
+            # 가게명 부분이 본문에 2회 이상 등장해야 진짜 그 가게 글
+            count = plain_content.count(store_part)
+            if count < 2:
+                log(f"   ⚠️ 핫플/맛집: 가게명/메뉴 '{store_part}' 본문에 {count}회만 등장 — 할루시네이션·중구난방 의심, 스킵")
+                return None, None
 
     return title, content
 
