@@ -26,6 +26,19 @@ WP_USER = "alfiejeong"
 WP_BASE = "https://alfiejeong.mycafe24.com/wp-json/wp/v2"
 MODEL_ID = "gemini-2.5-flash"
 
+# GitHub Pages를 본문 이미지 호스팅으로 활용 (cafe24 디스크 부담 회피).
+# 봇이 이미지를 naver_drafts/images/YYYY-MM/ 폴더에 저장 → autopost.yml의 git push 단계가
+# 함께 commit → deploy-pages.yml이 자동 배포 → 이 URL로 사이트에서 접근 가능.
+# (정두릅 결정 2026-05: cafe24 디스크 96% 도달 사고로 본문 이미지 외부 호스팅 전환)
+GITHUB_PAGES_BASE = os.environ.get(
+    "GITHUB_PAGES_BASE", "https://alfiejeong.github.io/blogbot"
+)
+
+# GitHub Pages URL → 로컬 파일 경로 매핑.
+# rehost_image_to_wp가 이미지를 저장할 때 채우고, upload_featured_image가
+# WP 업로드 시 deploy 지연 회피 위해 로컬 파일을 직접 읽는 데 사용.
+_IMAGE_LOCAL_PATHS = {}
+
 DB_DATA_URL = (
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vTMzfC-oh2JN4N2M7oAjQEDimJuI"
     "zWFmSHV2oa9tnC5raeTe5x6qfQ9xKR18iqZL1xI6ZdmaDeWOLWa/pub?gid=0&single=true&output=csv"
@@ -1828,45 +1841,60 @@ def rehost_image_to_wp(image_url, referer=None):
     이미지 다운로드 → WP 미디어 라이브러리 업로드 → (wp_id, wp_url) 반환.
     핫링크 차단된 언론사 이미지를 자체 도메인으로 옮긴다.
     """
+    # 정두릅 결정 2026-05: cafe24 디스크 부담 회피 위해 본문 이미지는
+    # WP 대신 GitHub Pages(naver_drafts/images/YYYY-MM/)에 저장.
+    # featured image(hero)는 upload_featured_image가 _IMAGE_LOCAL_PATHS에서 로컬 파일 읽어
+    # WP에 한 장만 업로드 — deploy 지연 무관.
     try:
+        from PIL import Image
+        from io import BytesIO
+        import hashlib
+        from datetime import datetime
+
         h = {"User-Agent": PRESS_USER_AGENT}
         if referer:
             h["Referer"] = referer
         rr = requests.get(image_url, headers=h, timeout=15)
-        # 15KB 미만은 보통 placeholder/로고/광고 배너
         if rr.status_code != 200 or len(rr.content) < 15_000:
             return None, None
-        ctype = rr.headers.get("Content-Type", "image/jpeg").lower()
-        if "png" in ctype:
-            ext = "png"
-        elif "webp" in ctype:
-            ext = "webp"
-        elif "gif" in ctype:
-            ext = "gif"
-        else:
-            ext = "jpg"
-        filename = f"press_{int(time.time())}_{random.randint(100, 999)}.{ext}"
-        headers = {
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Type": ctype,
-        }
-        ru = requests.post(
-            f"{WP_BASE}/media",
-            auth=auth,
-            headers=headers,
-            data=rr.content,
-            timeout=40,
-        )
-        if ru.status_code in (200, 201):
-            j = ru.json()
-            aid, aurl = j.get("id"), j.get("source_url")
-            # 업로드 직후 검증: WP가 200 줬어도 디스크에 파일 없으면 폐기
-            if not verify_wp_media(aurl, aid):
-                return None, None
-            return aid, aurl
-        log(f"   재호스팅 응답 {ru.status_code}: {ru.text[:120]}")
+
+        # Pillow로 압축 — 폭 1200 / JPEG 품질 80 (평균 500KB → 150KB)
+        try:
+            im = Image.open(BytesIO(rr.content))
+            if im.mode in ("RGBA", "LA"):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[-1])
+                im = bg
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            if im.width > 1200:
+                ratio = 1200 / im.width
+                im = im.resize((1200, int(im.height * ratio)), Image.LANCZOS)
+            buf = BytesIO()
+            im.save(buf, format="JPEG", quality=80, optimize=True)
+            img_bytes = buf.getvalue()
+        except Exception as pe:
+            log(f"   이미지 압축 실패, 원본 사용: {str(pe)[:60]}")
+            img_bytes = rr.content
+
+        # 저장 경로: naver_drafts/images/YYYY-MM/<ts>_<hash>.jpg
+        ym = datetime.now().strftime("%Y-%m")
+        url_hash = hashlib.md5(image_url.encode()).hexdigest()[:10]
+        ts = int(time.time())
+        filename = f"{ts}_{url_hash}.jpg"
+        dir_path = os.path.join("naver_drafts", "images", ym)
+        os.makedirs(dir_path, exist_ok=True)
+        file_path = os.path.join(dir_path, filename)
+        with open(file_path, "wb") as f:
+            f.write(img_bytes)
+
+        pages_url = f"{GITHUB_PAGES_BASE}/images/{ym}/{filename}"
+        # upload_featured_image가 deploy 지연 회피 위해 로컬 파일 직접 읽도록 매핑 저장
+        _IMAGE_LOCAL_PATHS[pages_url] = file_path
+        log(f"   📦 GitHub Pages 저장: {len(img_bytes)//1024}KB → images/{ym}/{filename}")
+        return None, pages_url
     except Exception as e:
-        log(f"   재호스팅 실패: {e}")
+        log(f"   GitHub Pages 재호스팅 실패: {str(e)[:80]}")
     return None, None
 
 
@@ -3389,7 +3417,16 @@ def upload_featured_image(img):
     if img.get("wp_id"):
         return img["wp_id"]
     try:
-        binary = requests.get(img["url"], timeout=12).content
+        # 정두릅 결정 2026-05: 본문 이미지는 GitHub Pages 호스팅. featured만 WP 업로드.
+        # 1순위 — 로컬 파일에서 직접 읽기 (deploy 지연 시 URL 다운로드 404 회피)
+        url = img.get("url", "")
+        local_path = _IMAGE_LOCAL_PATHS.get(url)
+        if local_path and os.path.exists(local_path):
+            with open(local_path, "rb") as f:
+                binary = f.read()
+        else:
+            # 2순위 — URL로 다운로드 (외부 URL 직접 사용 케이스)
+            binary = requests.get(url, timeout=12).content
         filename = f"hero_{int(time.time())}.jpg"
         headers = {
             "Content-Disposition": f'attachment; filename="{filename}"',
