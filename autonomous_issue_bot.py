@@ -689,6 +689,14 @@ NEWS_CONTEXT_NONFIT_TERMS = [
     "IPO", "상장 예정", "상장예정", "유가증권시장 상장", "코스닥 상장",
     "주관사", "대표주관", "수요예측",
     "M&A 계약", "인수합병", "지분 매각", "지분매각",
+    # 주식·증시 관련 — 키워드 "에코프로비엠"이어도 뉴스가 주가면 차단
+    "주가", "상한가", "하한가", "장중", "전일 대비", "장 마감",
+    "거래량", "시가총액", "시총", "체결",
+    "애널리스트", "증권사 리포트", "목표주가", "투자의견",
+    "PER", "PBR", "ROE", "EPS",
+    # 실적·재무
+    "분기 매출", "분기매출", "분기 영업이익", "분기영업이익",
+    "어닝 서프라이즈", "어닝 쇼크", "컨센서스 상회", "컨센서스 하회",
 ]
 
 
@@ -3018,6 +3026,25 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     h2_count = len(re.findall(r"<h2", content, flags=re.IGNORECASE))
     if h2_count < 3:
         log(f"   ⚠️ H2 헤딩 {h2_count}개만 — 글 구조 미완, 스킵")
+        return None, None
+
+    # ★ 일본어/외국어 검출 — Groq Llama가 한국어 글에 가나·한자 섞는 사고 차단 ★
+    # (정두릅 결정 2026-05: 일본어 섞인 글은 즉시 거부)
+    plain_for_lang = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content)
+    kana_count = sum(
+        1 for ch in plain_for_lang
+        if 0x3040 <= ord(ch) <= 0x30FF  # 히라가나 + 카타카나
+    )
+    if kana_count >= 5:
+        log(f"   🚫 일본어 가나 {kana_count}자 검출 — 한국어 글 부적합, 발행 거부")
+        return None, None
+    # 한자도 과도하면 검출 (한국어는 일부 한자 허용하지만 본문 50자 이상은 위험)
+    hanja_count = sum(
+        1 for ch in plain_for_lang
+        if 0x4E00 <= ord(ch) <= 0x9FFF
+    )
+    if hanja_count >= 50:
+        log(f"   🚫 한자 {hanja_count}자 과도 검출 — 발행 거부")
         return None, None
 
     # ★ 핫플/맛집: 가게명이 본문에 충분히 등장해야 (할루시네이션·중구난방 차단) ★
