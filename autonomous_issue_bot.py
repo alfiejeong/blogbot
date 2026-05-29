@@ -468,7 +468,11 @@ def discover_trending_places_from_blogs(d_df, target=3):
 
 [추출 규칙]
 - 형식: "동네 가게이름" 또는 "가게이름 동네" (예: "성수동 어니언", "한남동 노티드")
-- 가게 이름이 분명히 보일 때만. 추측 금지.
+- **반드시 가게 이름이 들어가야 함**. 가게 이름 없는 키워드 절대 금지.
+  → ❌ "홍대입구역", "성수동", "강남구", "이태원" 같은 지역·역 이름 단독 X
+  → ❌ "홍대 카페", "강남 맛집" 같은 일반 카테고리 X
+  → ✅ "성수동 어니언", "홍대 카멜커피", "한남동 노티드" 같이 가게 이름 포함
+- 추측 금지. 제목에 가게 이름이 명확히 안 보이면 그 제목은 건너뛰기.
 - 광고·홍보·일반 후기는 제외 (예: "맛집 추천", "카페 베스트10" 같은 일반 키워드 X)
 - **★ 절대 제외 ★**: 팝업스토어, 페스티벌, 축제, 임팩트, 단기 이벤트 (시기 민감해서 종료 후 다루는 사고)
 - 음식점·카페·베이커리만 (상시 영업하는 곳)
@@ -552,6 +556,26 @@ def build_keyword_pool(d_df):
     pool = [k for k in pool if not any(b in k for b in BANNED_TIME_SENSITIVE)]
     if len(pool) < before:
         log(f"   🚫 시기 민감 키워드 {before - len(pool)}개 제거 (팝업/축제 등)")
+
+    # 5) 광범위 지역 단독 키워드 자동 제거 — "홍대입구역" 같은 역·동·구 단독은
+    # 특정 가게가 없어 묶음 글·일반론으로 빠짐 (정두릅 결정 2026-05)
+    GENERIC_LOC_PATTERNS = [
+        r"^[가-힣]{1,8}역$",          # XX역
+        r"^[가-힣]{2,5}동$",          # XX동
+        r"^[가-힣]{2,4}구$",          # XX구
+        r"^[가-힣]{2,5}길$",          # XX길
+        r"^[가-힣]{2,5}로$",          # XX로
+        r"^[가-힣]{2,5}시$",          # XX시
+        r"^[가-힣]{2,5}군$",          # XX군
+    ]
+    def _is_generic_location(k):
+        s = k.strip()
+        return any(re.match(p, s) for p in GENERIC_LOC_PATTERNS)
+    before = len(pool)
+    pool = [k for k in pool if not _is_generic_location(k)]
+    if len(pool) < before:
+        log(f"   🚫 광범위 지역 단독 키워드 {before - len(pool)}개 제거 (역/동/구 단독)")
+
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
 
@@ -697,6 +721,13 @@ NEWS_CONTEXT_NONFIT_TERMS = [
     # 실적·재무
     "분기 매출", "분기매출", "분기 영업이익", "분기영업이익",
     "어닝 서프라이즈", "어닝 쇼크", "컨센서스 상회", "컨센서스 하회",
+    # 기업 부동산·투자 행보 (정두릅 결정 2026-05: 신세계 3조원 복합 랜드마크 사례)
+    # "광주 신세계" 같은 키워드가 통과해도 뉴스 본문이 부동산 투자면 차단
+    "조원 투자", "조 원 투자", "조원 규모", "조 원 규모",
+    "복합 랜드마크", "랜드마크", "신사옥", "사옥 이전",
+    "대형 투자", "투자 발표", "투자 계획",
+    "신축", "착공", "준공", "재개발", "재건축",
+    "오피스 빌딩", "비즈니스 호텔",
 ]
 
 
@@ -2123,12 +2154,43 @@ def collect_place_images_via_naver_local(kw, target=3):
     out = []
     rejected_no_link = 0
     rejected_no_og = 0
+    rejected_name_mismatch = 0
     n_og, n_body = 0, 0
+
+    # ★ 키워드와 가게명 일치 검증 — "수유 커피문화사" 키워드인데 "아꾸찜" 잡히는 사고 차단
+    # (정두릅 결정 2026-05)
+    def _store_name_matches_keyword(store_name, keyword):
+        store_name = (store_name or "").strip()
+        keyword = (keyword or "").strip()
+        if not store_name or not keyword:
+            return False
+        tokens = keyword.split()
+        # 키워드가 한 단어면 검증 못 함 (지역명만이거나 가게명만이거나)
+        if len(tokens) < 2:
+            return True
+        # 첫 토큰은 지역명일 가능성 → 나머지가 가게명/메뉴
+        store_part = " ".join(tokens[1:]).strip()
+        if len(store_part) < 2:
+            return True
+        # 가게 이름에 store_part 자체 또는 그 부분 단어가 포함되어야 함
+        if store_part in store_name:
+            return True
+        # store_part의 단어 중 2글자 이상이 가게 이름에 포함되면 OK
+        for word in store_part.split():
+            if len(word) >= 2 and word in store_name:
+                return True
+        return False
+
     for p in places:
         if len(out) >= target:
             break
         if not p["link"]:
             rejected_no_link += 1
+            continue
+        # 가게 이름 키워드 일치 검증
+        if not _store_name_matches_keyword(p.get("name", ""), kw):
+            rejected_name_mismatch += 1
+            log(f"   ✗ 가게 '{p.get('name','')}' 키워드 '{kw}'와 불일치 → 거부")
             continue
         # 1차: 가게 홈페이지의 OG/twitter:image
         img_url = extract_og_image_from_url(p["link"])
@@ -2158,7 +2220,8 @@ def collect_place_images_via_naver_local(kw, target=3):
             n_body += 1
         log(f"   ✓ 가게 이미지 채택({source_tag.split('_')[-1]}): {p['name']}")
     log(f"   📍 지역 검색 결과: 채택 {len(out)} (OG {n_og} / 본문 {n_body}) / "
-        f"홈페이지 없음 {rejected_no_link} / 이미지 없음 {rejected_no_og}")
+        f"홈페이지 없음 {rejected_no_link} / 이미지 없음 {rejected_no_og} / "
+        f"이름 불일치 {rejected_name_mismatch}")
     return out
 
 
@@ -2684,6 +2747,29 @@ READABILITY_GUIDELINES = """
   "1위를 차지했다" → "1위 차지했더라구요"
 - 친구한테 카톡 보내듯 자연스럽게. 뉴스 기사 같은 톤 절대 금지.
 
+[★ 사진 설명 사설 절대 금지 ★]
+- 본문에 "○○의 사진", "○○의 드레스 사진", "○○의 최근 사진", "사진 캡처",
+  "사진 = ○○", "이미지 출처" 같은 사진 설명 사설 절대 금지.
+- 사진은 시각으로 따로 들어가니 본문에서 사진 자체를 언급·설명하지 마라.
+- 본문에는 사실·이야기·반응만. "사진을 보면" 류 문구도 금지.
+
+[★ 한자·외국어 절대 금지 ★]
+- 본문에 한자(漢字), 일본어 가나(かな·カナ), 중국어 간체 등 모두 금지.
+- 한국어 한글로만. 인명도 한자병기 X (예: "金민수" → "김민수").
+- 의역 가능한 한자어는 풀어쓰기 (예: "截圖" → "캡처 화면").
+
+[★ 제목·본문 일치 강제 ★]
+- 제목에 "○○ 이유", "○○ 분석", "○○ 정리" 같은 약속이 들어가면 본문에 반드시 그 약속 충족.
+  → "안 풀리는 이유"라 했으면 본문에 구체 이유 최소 2개 이상.
+  → "왜 화제" 라 했으면 본문에 화제 원인 명시.
+- 본문에 약속 못 채우면 제목 자체를 바꿔라. 빈 약속 절대 X.
+
+[★ 제목 자연스러운 한국어 ★]
+- "○○에서 제일 화제인 그 사람", "○○이 미친 그 이슈" 같은 어색한 비문 금지.
+- 자연스러운 한국어 표현: "○○이 화제가 된 이유", "○○의 그날 무슨 일이",
+  "○○ 사람들이 놀란 한 가지", "○○ 다시 보게 된 순간" 등.
+- 영어식 직역체("○○의 ○○인 ○○") 금지.
+
 [가독성 절대 원칙 — Yoast SEO Readability 점수 향상]
 - **한 문장 60자 이내**. 길어지면 두 문장으로 나눠라. 쉼표로 길게 잇지 말 것.
 - **연결어를 자연스럽게 분포**: '근데', '그런데', '솔직히', '그래서', '그러고 보면',
@@ -3035,17 +3121,38 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         1 for ch in plain_for_lang
         if 0x3040 <= ord(ch) <= 0x30FF  # 히라가나 + 카타카나
     )
-    if kana_count >= 5:
+    if kana_count >= 3:
         log(f"   🚫 일본어 가나 {kana_count}자 검출 — 한국어 글 부적합, 발행 거부")
         return None, None
-    # 한자도 과도하면 검출 (한국어는 일부 한자 허용하지만 본문 50자 이상은 위험)
+    # 한자 임계값 강화 — 한국어 글에 한자는 거의 안 써야. 5자 이상 검출 시 거부
+    # (정두릅 결정 2026-05: "截圖" 같은 중국어/한자 섞임 차단)
     hanja_count = sum(
         1 for ch in plain_for_lang
         if 0x4E00 <= ord(ch) <= 0x9FFF
     )
-    if hanja_count >= 50:
-        log(f"   🚫 한자 {hanja_count}자 과도 검출 — 발행 거부")
+    if hanja_count >= 5:
+        log(f"   🚫 한자 {hanja_count}자 검출 — 발행 거부")
         return None, None
+
+    # ★ 사진 설명 사설 제거 ★
+    # "○○의 사진", "○○의 드레스 사진", "사진 캡처", "사진 = ○○" 등의 사설 본문에서 제거.
+    # 모델이 가이드 어겨도 후처리로 한 번 더 거름.
+    PHOTO_SETUL_PATTERNS = [
+        r"[가-힣]{2,5}(?:의)?\s*(?:최근\s*)?(?:드레스\s*|복귀\s*)?사진",
+        r"사진\s*캡처",
+        r"사진\s*=\s*[^<\n]{1,30}",
+        r"이미지\s*출처",
+        r"사진\s*출처",
+        r"캡처\s*화면",
+    ]
+    for pat in PHOTO_SETUL_PATTERNS:
+        # <p> 안에 사진 사설만 있는 단락은 통째로 제거
+        content = re.sub(
+            r"<p[^>]*>\s*[^<]*?" + pat + r"[^<]*?\s*</p>",
+            "",
+            content,
+            flags=re.IGNORECASE,
+        )
 
     # ★ 핫플/맛집: 가게명이 본문에 충분히 등장해야 (할루시네이션·중구난방 차단) ★
     # 정두릅 결정 2026-05: 키워드 "공덕 도시의식탁" 같은 경우 가게명("도시의식탁")이
@@ -4297,14 +4404,24 @@ def run_bot():
             if info["category"] not in ALLOWED_CATEGORIES:
                 cat_from_news = classify_by_news_context(news_items, kw)
                 if cat_from_news in ALLOWED_CATEGORIES:
-                    # hotspot/restaurant 보정은 지역명 검증 통과 시에만
+                    # hotspot/restaurant 보정은 지역명 검증 통과 + 인물 키워드 아닌 경우만
                     if cat_from_news in ("hotspot", "restaurant"):
                         if is_nationwide_brand_alone(kw) or not has_explicit_region(kw):
                             log(f"   🛡️ 뉴스기반은 {cat_from_news}였지만 지역명 없음 → SKIP 유지")
                             cat_from_news = None
+                        elif info.get("is_person"):
+                            log(f"   🛡️ 뉴스기반은 {cat_from_news}였지만 인물 키워드 → SKIP 유지")
+                            cat_from_news = None
                     if cat_from_news in ALLOWED_CATEGORIES:
                         log(f"   🛡️ 뉴스기반 보정: SKIP → {cat_from_news}")
                         info["category"] = cat_from_news
+
+            # ★ 인물 키워드는 hotspot/restaurant 절대 금지 ★
+            # (정두릅 결정 2026-05: "구성환" 같은 사람을 장소로 분류해서 "다녀왔다" 톤
+            # 글이 나오는 사고 차단. 인물이면 entertainment/sports만 허용.)
+            if info.get("is_person") and info["category"] in ("hotspot", "restaurant"):
+                log(f"   🚫 인물 키워드를 핫플/맛집으로 분류 불가 — 발행 스킵")
+                continue
 
             # ②-C 화이트리스트 게이트 (restaurant/hotspot/entertainment/sports만 발행)
             if info["category"] not in ALLOWED_CATEGORIES:
