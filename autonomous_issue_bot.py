@@ -4538,7 +4538,9 @@ def run_bot():
         except Exception as e:
             log(f"🚨 [{kw}] 오류: {e}")
 
-        time.sleep(8)
+        # 키워드 사이 sleep — Gemini·Groq 분당 호출 한도 분산
+        # (정두릅 결정 2026-05: 발행 2배로 늘리면서 윤색 quota 누적 → 누락 방지)
+        time.sleep(12)
 
     log(f"\n✅ 실행 종료. 이번 회차 신규 발행: {posted_count}개")
 
