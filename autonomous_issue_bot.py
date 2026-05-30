@@ -45,8 +45,9 @@ DB_DATA_URL = (
 )
 
 # 1회 실행당 최대 발행 글 수 (중복 제외 후)
-# 풀 27개에서 필터 강화 후 통과율 ~20% 가정 → 회차당 5편 처리 가능
-MAX_POSTS_PER_RUN = 5
+# 풀 25개에서 필터 통과율 ~25% 가정 → 회차당 6~10편 처리 가능
+# (정두릅 결정 2026-05: 회당 발행 2배 목표로 5 → 10)
+MAX_POSTS_PER_RUN = 10
 
 # 글 1편당 총 이미지 수 (featured 1장 + 본문 N-1장)
 # 본문 350~500자 기준 3이 적정. 더 이미지 강조하려면 4, 더 글 위주면 2.
@@ -235,8 +236,9 @@ def get_google_trends():
             t = item.find("title")
             if t is not None and t.text:
                 keywords.append(t.text.strip())
-        # 후보 풀을 16개로 — 필터 통과율 25% 가정 시 4편 확보 가능
-        final = keywords[:16]
+        # 후보 풀 — 25개로 확대 (정두릅 결정 2026-05: 회당 발행 2배 목표)
+        # 필터 통과율 ~20% 가정 시 회당 4~6편 확보 가능
+        final = keywords[:25]
         log(f"✅ 트렌드 키워드 {len(final)}개: {final}")
         return final
     except Exception as e:
@@ -541,8 +543,8 @@ def build_keyword_pool(d_df):
     - 트렌드 RSS만 활용. entertainment/sports/game/it/auto 5개 카테고리만 통과
     """
     pool = []
-    # 트렌드 RSS — 12개로 보수적 (필터링 강해 회당 발행 후보는 1~3건)
-    pool.extend(get_google_trends()[:12])
+    # 트렌드 RSS — 25개로 확대 (회당 발행 2배 목표)
+    pool.extend(get_google_trends()[:25])
 
     # 시기 민감 키워드 제거 (팝업/축제는 종료 후 다루는 사고)
     BANNED_TIME_SENSITIVE = ("팝업", "팝업스토어", "페스티벌", "축제", "임팩트")
