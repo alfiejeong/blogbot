@@ -535,46 +535,34 @@ def discover_trending_places_from_blogs(d_df, target=3):
 
 def build_keyword_pool(d_df):
     """
-    트렌드 RSS + 네이버 블로그 트렌딩 자동 발견.
-    정두릅 결정 2026-05 (핫플/맛집 품질 사고 다수 → 시드 자체 축소):
-    - 거지주차 일반 카테고리 시드 완전 비활성 ("X구 카페" 같은 키워드는
-      구체 가게 없어 모델이 할루시네이션·중구난방 글로 빠짐. 사례: 성북 인스타 감성,
-      양천 내추럴 와인 등)
-    - 블로그 트렌딩만 유지(단일 가게명 형식). 1개로 보수적.
-    - 팝업스토어 키워드는 시기 민감 + 종료 후 잡히는 사고 다수 → 자동 제거
+    구글 트렌드 RSS만 사용.
+    정두릅 결정 2026-05 (위치 카테고리 완전 폐지):
+    - 핫플/맛집 폐지 → 블로그 트렌딩(가게 발견)·거지주차 시드 모두 비활성
+    - 트렌드 RSS만 활용. entertainment/sports/game/it/auto 5개 카테고리만 통과
     """
     pool = []
-    # 1) 구글 트렌드 RSS — 연예/방송/스포츠가 핵심
-    pool.extend(get_google_trends()[:10])
-    # 2) (비활성) 거지주차 DB 일반 카테고리 시드 — 일반론·할루시네이션 위험
-    # pool.extend(get_seed_keywords_from_parking_db(d_df, n=1))
-    # 3) 네이버 블로그 트렌딩 — 단일 가게명 발견 (보수적 1개)
-    pool.extend(discover_trending_places_from_blogs(d_df, target=1))
-    # 4) 시기 민감 키워드 자동 제거 — 팝업/페스티벌/축제 등 종료 후 다루는 사고 차단
-    BANNED_TIME_SENSITIVE = ("팝업", "팝업스토어", "페스티벌", "축제", "임팩트", "단기 오픈")
+    # 트렌드 RSS — 12개로 보수적 (필터링 강해 회당 발행 후보는 1~3건)
+    pool.extend(get_google_trends()[:12])
+
+    # 시기 민감 키워드 제거 (팝업/축제는 종료 후 다루는 사고)
+    BANNED_TIME_SENSITIVE = ("팝업", "팝업스토어", "페스티벌", "축제", "임팩트")
     before = len(pool)
     pool = [k for k in pool if not any(b in k for b in BANNED_TIME_SENSITIVE)]
     if len(pool) < before:
-        log(f"   🚫 시기 민감 키워드 {before - len(pool)}개 제거 (팝업/축제 등)")
+        log(f"   🚫 시기 민감 키워드 {before - len(pool)}개 제거")
 
-    # 5) 광범위 지역 단독 키워드 자동 제거 — "홍대입구역" 같은 역·동·구 단독은
-    # 특정 가게가 없어 묶음 글·일반론으로 빠짐 (정두릅 결정 2026-05)
+    # 광범위 지역 단독 키워드 제거 — 핫플 폐지 정책상 그냥 SKIP될 것
     GENERIC_LOC_PATTERNS = [
-        r"^[가-힣]{1,8}역$",          # XX역
-        r"^[가-힣]{2,5}동$",          # XX동
-        r"^[가-힣]{2,4}구$",          # XX구
-        r"^[가-힣]{2,5}길$",          # XX길
-        r"^[가-힣]{2,5}로$",          # XX로
-        r"^[가-힣]{2,5}시$",          # XX시
-        r"^[가-힣]{2,5}군$",          # XX군
+        r"^[가-힣]{1,8}역$", r"^[가-힣]{2,5}동$", r"^[가-힣]{2,4}구$",
+        r"^[가-힣]{2,5}길$", r"^[가-힣]{2,5}로$",
+        r"^[가-힣]{2,5}시$", r"^[가-힣]{2,5}군$",
     ]
     def _is_generic_location(k):
-        s = k.strip()
-        return any(re.match(p, s) for p in GENERIC_LOC_PATTERNS)
+        return any(re.match(p, k.strip()) for p in GENERIC_LOC_PATTERNS)
     before = len(pool)
     pool = [k for k in pool if not _is_generic_location(k)]
     if len(pool) < before:
-        log(f"   🚫 광범위 지역 단독 키워드 {before - len(pool)}개 제거 (역/동/구 단독)")
+        log(f"   🚫 광범위 지역 키워드 {before - len(pool)}개 제거")
 
     log(f"🎯 최종 키워드 풀 {len(pool)}개")
     return pool
@@ -630,7 +618,7 @@ def is_recent_duplicate(kw, recent_titles):
 
 # --- [4. 키워드 분류 (Gemini + 휴리스틱 안전망)] ---
 # 발행 가능 카테고리 화이트리스트. 그 외는 무조건 스킵.
-ALLOWED_CATEGORIES = {"restaurant", "hotspot", "entertainment", "sports"}
+ALLOWED_CATEGORIES = {"entertainment", "sports", "game", "it", "auto"}
 
 # 분류 전 사전 차단 패턴 (정치/경제/코인/매체/IT/날씨 등)
 NONFIT_TOPIC_PATTERNS = [
@@ -665,15 +653,11 @@ NONFIT_TOPIC_PATTERNS = [
     # 날씨/재난
     "날씨", "태풍", "지진", "폭우", "폭설", "폭염", "한파",
     "미세먼지", "황사", "장마", "산불", "홍수",
-    # IT 제품/스펙
-    "갤럭시", "아이폰", "맥북", "갤럭시 S", "에어팟", "출시일",
-    "스펙", "사양", "벤치마크",
-    # 광범위한 도구·물건 키워드 (인물/장소/방송 특정 안 됨 → 일반론 글)
-    # 정두릅 결정 2026-05: "골프 카트" 같은 범용 키워드는 콘텐츠 집중도 낮음
+    # IT/auto 카테고리는 이제 허용 — "갤럭시", "아이폰", "테슬라" 등은 발행 대상
+    # (정두릅 결정 2026-05: it/auto 카테고리 추가)
+    # 다만 광범위 도구 키워드 일부는 차단 유지 (집중도 낮은 케이스)
     "골프 카트", "골프카트", "골프채", "골프웨어", "골프공", "골프백",
     "자전거", "오토바이", "전동킥보드", "스쿠터",
-    "노트북", "모니터", "키보드", "마우스", "헤드폰", "이어폰",
-    "카메라", "렌즈", "드론",
     "냉장고", "세탁기", "에어컨", "건조기", "공기청정기",
     "가구", "소파", "침대",
 ]
@@ -1092,15 +1076,13 @@ def classify_keyword(kw):
             "image_queries": [f"{kw}", "kpop stage performance", "korean drama scene", "tv show set"],
             "is_person": False, "is_brand_or_show": True,
         }
+    # 위치 키워드는 모두 SKIP (정두릅 결정 2026-05: 핫플/맛집 카테고리 완전 폐지)
     h_place = heuristic_is_place(kw)
     if h_place is True:
-        # 키워드 앞 부분에서 지역명 추출 (예: "양천 데이트 코스" → "양천")
-        region_match = re.match(r"^([가-힣]{2,5}(?:구|동)?)\s", kw)
-        region = region_match.group(1) if region_match else None
-        log(f"   ⚡ 휴리스틱 단언: {kw} → hotspot region={region} (Gemini 스킵)")
+        log(f"   🚫 위치 신호 키워드 → 핫플/맛집 폐지로 SKIP: {kw}")
         return {
-            "category": "hotspot", "region": region,
-            "image_queries": [f"{kw}", "korean restaurant interior", "cafe seoul", "popular hotspot"],
+            "category": "SKIP", "region": None,
+            "image_queries": [],
             "is_person": False, "is_brand_or_show": False,
         }
 
@@ -1108,38 +1090,37 @@ def classify_keyword(kw):
     prompt = f"""한국 트렌드 키워드 "{kw}"를 분석해. 오직 아래 JSON만. 코드블록 금지.
 
 {{
-  "category": "restaurant 또는 hotspot 또는 entertainment 또는 sports 또는 SKIP",
-  "region": "강남구/성수동/잠실 같은 지역명, 장소 아니면 null",
+  "category": "entertainment 또는 sports 또는 game 또는 it 또는 auto 또는 SKIP",
+  "region": null,
   "image_queries": ["영어 이미지 검색어 4개"],
   "is_person": true 또는 false,
   "is_brand_or_show": true 또는 false
 }}
 
-[엄격한 분류 규칙 — 4개 카테고리만 발행, 나머지는 SKIP]
-- restaurant: 식당/카페/베이커리/디저트 - 먹는 곳 자체
-- hotspot: 사람 모이는 물리적 장소 (쇼핑몰/팝업/명소/공원)
+[엄격한 분류 규칙 — 5개 카테고리만 발행, 나머지는 SKIP]
 - entertainment: 연예인/예능 프로그램/드라마/연애 프로그램/OTT/가수/배우/아이돌/유튜버
   → 프로그램 제목에 지역명이 들어가도 entertainment.
 - sports: 스포츠 선수/팀/리그/경기 결과 (야구/축구/배구/농구/e스포츠 등)
-- SKIP: 위 4개 어디에도 안 들어가면 모두 SKIP
-  → 정치/경제/주식/코인/부동산/뉴스 매체명/방송채널/IT 제품/날씨/사건사고는 전부 SKIP
+- game: 비디오 게임/모바일 게임/콘솔/PC 게임/스팀/플레이스테이션/닌텐도/게임 신작/업데이트
+  → 게임 제목·게임 회사·게임 캐릭터·게임 콜라보 등
+- it: IT 제품/스마트폰/노트북/AI 서비스/소프트웨어/앱/플랫폼/기술 트렌드
+  → 갤럭시·아이폰·맥북·챗GPT·테슬라(자율주행 기술)·메타·구글 등
+- auto: 자동차/전기차/모빌리티/신차 출시/리뷰
+  → 현대·기아·테슬라(차량)·BMW·벤츠·신차 모델명 등
+- SKIP: 위 5개 외 모두. 위치/맛집/핫플/카페/식당은 무조건 SKIP.
+  정치/경제/주식/코인/부동산/뉴스 매체명/방송채널/날씨/사건사고도 SKIP.
 
 [중요 예시]
-- "구기동 프렌즈" → entertainment (예능 프로그램, '구기동'이 들어가도 절대 동네 아님)
-- "나는솔로", "솔로지옥", "환승연애" → entertainment
-- "오징어게임 시즌3" → entertainment
-- "크리스 존슨", "유재석", "김종국" → entertainment
-- "방탄소년단", "뉴진스" → entertainment
-- "허수봉" → sports (배구 선수)
-- "페이커" → sports (e스포츠 선수)
-- "kt 위즈", "두산 베어스" → sports
-- "아스널 FC", "토트넘" → sports
-- "성수동 베이글" → restaurant, region="성수동"
-- "잠실 야구장" → hotspot, region="잠실"
-- "비트코인", "코인니스" → SKIP
-- "한국경제tv", "뉴스파이터" → SKIP
-- "갤럭시 S25" → SKIP
-- "절약", "재테크" → SKIP
+- "나는솔로", "솔로지옥" → entertainment
+- "오징어게임 시즌3", "유재석", "방탄소년단" → entertainment
+- "페이커", "kt 위즈", "아스널 FC" → sports
+- "젤다의 전설", "엘든링", "GTA 6", "스타크래프트" → game
+- "닌텐도 스위치 2", "PS6", "스팀덱" → game
+- "갤럭시 S25", "아이폰 17", "맥북 프로 M5" → it
+- "챗GPT 5", "구글 제미니", "메타 AI" → it
+- "테슬라 모델 Y", "현대 아이오닉 9", "기아 EV5" → auto
+- "성수동 베이글", "강남 카페", "홍대입구역" → SKIP (위치 X)
+- "비트코인", "코스피", "갤럭시 S25 가격" → SKIP (코인/주식)
 
 [image_queries]
 - 반드시 영어. 한국어/한국 지명 금지.
@@ -3585,8 +3566,9 @@ def upload_featured_image(img):
 CATEGORY_TO_WP = {
     "sports": ("sports", "스포츠"),
     "entertainment": ("entertainment", "연예·방송"),
-    "hotspot": ("places", "핫플·맛집"),
-    "restaurant": ("places", "핫플·맛집"),
+    "game": ("game", "게임"),
+    "it": ("it", "IT"),
+    "auto": ("auto", "자동차"),
 }
 
 # 슬러그 → WP 카테고리 ID 캐시 (한 번 조회/생성한 건 메모리 캐시)
@@ -3764,8 +3746,9 @@ NAVER_DRAFTS_DIR = "naver_drafts"
 CATEGORY_KR_MAP = {
     "sports": "스포츠",
     "entertainment": "연예·방송",
-    "hotspot": "핫플·맛집",
-    "restaurant": "핫플·맛집",
+    "game": "게임",
+    "it": "IT",
+    "auto": "자동차",
     "general": "오늘의 이슈",
 }
 
