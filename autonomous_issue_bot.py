@@ -537,14 +537,39 @@ def discover_trending_places_from_blogs(d_df, target=3):
 
 def build_keyword_pool(d_df):
     """
-    구글 트렌드 RSS만 사용.
-    정두릅 결정 2026-05 (위치 카테고리 완전 폐지):
-    - 핫플/맛집 폐지 → 블로그 트렌딩(가게 발견)·거지주차 시드 모두 비활성
-    - 트렌드 RSS만 활용. entertainment/sports/game/it/auto 5개 카테고리만 통과
+    구글 트렌드 RSS + 카테고리별 화이트리스트 보충.
+    정두릅 결정 2026-05:
+    - Google Trends RSS는 시간대마다 5~25개 변동
+    - 부족할 때 게임/IT/자동차 인기 키워드로 보충 (7일 중복 차단으로 자연 회전)
     """
     pool = []
-    # 트렌드 RSS — 25개로 확대 (회당 발행 2배 목표)
+    # 1) 트렌드 RSS — 25개로 확대 시도 (실제로는 시간대 따라 10~25개)
     pool.extend(get_google_trends()[:25])
+
+    # 2) 트렌드 RSS가 15개 미만이면 화이트리스트로 보충 — 25개 목표
+    CATEGORY_WHITELIST = [
+        # 게임 — 화제 작품·플랫폼
+        "젤다의 전설", "엘든링", "GTA 6", "닌텐도 스위치 2", "PS6",
+        "스팀덱", "발더스 게이트 3", "디아블로 4", "원신", "팰월드",
+        "마인크래프트", "로블록스", "포트나이트", "리그 오브 레전드",
+        "오버워치 2", "스타크래프트", "스플래툰 3", "젤다 야숨",
+        # IT — 신상 제품·서비스
+        "갤럭시 S25", "갤럭시 Z 플립7", "갤럭시 Z 폴드7", "아이폰 17",
+        "맥북 프로 M5", "아이패드 프로", "에어팟 프로 3",
+        "챗GPT", "구글 제미니", "메타 AI", "클로드", "퍼플렉시티",
+        # 자동차 — 신차·전기차
+        "테슬라 모델 Y", "현대 아이오닉 9", "기아 EV5", "현대 캐스퍼 EV",
+        "BMW i5", "벤츠 EQE", "BYD 아토 3", "포르쉐 타이칸",
+        "현대 아반떼", "기아 카니발", "쏘렌토 하이브리드",
+    ]
+    if len(pool) < 15:
+        need = 25 - len(pool)
+        # 중복 제거 후 랜덤 픽업
+        candidates = [k for k in CATEGORY_WHITELIST if k not in pool]
+        random.shuffle(candidates)
+        boost = candidates[:need]
+        pool.extend(boost)
+        log(f"   🎲 화이트리스트 보충 {len(boost)}개")
 
     # 시기 민감 키워드 제거 (팝업/축제는 종료 후 다루는 사고)
     BANNED_TIME_SENSITIVE = ("팝업", "팝업스토어", "페스티벌", "축제", "임팩트")
@@ -3064,7 +3089,25 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         m = re.search(r"\{.*\}", txt, re.DOTALL)
         if m:
             txt = m.group(0)
-        data = json.loads(txt)
+        # JSON 파싱 — strict=False로 string value 안의 raw 줄바꿈/제어문자 허용
+        # (정두릅 결정 2026-05: Llama가 content_html 안에 raw 따옴표/줄바꿈 박는 사고 회복)
+        try:
+            data = json.loads(txt, strict=False)
+        except json.JSONDecodeError:
+            # 제어문자 제거 후 재시도
+            cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", txt)
+            try:
+                data = json.loads(cleaned, strict=False)
+            except json.JSONDecodeError:
+                # content_html 안의 raw " 를 \" 로 escape (가장 흔한 깨짐 패턴)
+                # "content_html": "<h2>...</h2>... " ... " ... " 형태에서 raw "가 들어가 깨지는 케이스
+                escaped = re.sub(
+                    r'("content_html"\s*:\s*")(.*?)("\s*})',
+                    lambda mo: mo.group(1) + mo.group(2).replace('"', '\\"') + mo.group(3),
+                    cleaned,
+                    flags=re.DOTALL,
+                )
+                data = json.loads(escaped, strict=False)
         title = (data.get("title") or "").strip()
         content = (data.get("content_html") or "").strip()
         if not title or not content:
