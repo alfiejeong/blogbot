@@ -736,8 +736,9 @@ NEWS_CONTEXT_NONFIT_TERMS = [
     # "광주 신세계" 같은 키워드가 통과해도 뉴스 본문이 부동산 투자면 차단
     "조원 투자", "조 원 투자", "조원 규모", "조 원 규모",
     "복합 랜드마크", "랜드마크", "신사옥", "사옥 이전",
-    "대형 투자", "투자 발표", "투자 계획",
-    "신축", "착공", "준공", "재개발", "재건축",
+    "대형 투자 발표", "투자 계획 발표",
+    # 정두릅 결정 2026-06: "신축/착공/준공/재개발/재건축"은 게임/IT의 "신규 출시"·
+    # "신규 업데이트"·"착공" 같은 정상 표현에 과민 매치 → 제거
     "오피스 빌딩", "비즈니스 호텔",
 ]
 
@@ -3140,24 +3141,24 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         log(f"   ⚠️ H2 헤딩 {h2_count}개만 — 글 구조 미완, 스킵")
         return None, None
 
-    # ★ 일본어/외국어 검출 — Groq Llama가 한국어 글에 가나·한자 섞는 사고 차단 ★
-    # (정두릅 결정 2026-05: 일본어 섞인 글은 즉시 거부)
+    # ★ 외국어 0자 강제 — 한자·가나 1자라도 검출 시 즉시 거부 ★
+    # (정두릅 결정 2026-06: 포트나이트 네이버 드래프트 중국어 사고 — AI 적발 위험 100%)
+    # 제목 + 본문 통째로 검사
     plain_for_lang = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content)
+    check_text = title + plain_for_lang
     kana_count = sum(
-        1 for ch in plain_for_lang
+        1 for ch in check_text
         if 0x3040 <= ord(ch) <= 0x30FF  # 히라가나 + 카타카나
     )
-    if kana_count >= 3:
-        log(f"   🚫 일본어 가나 {kana_count}자 검출 — 한국어 글 부적합, 발행 거부")
+    if kana_count > 0:
+        log(f"   🚫 일본어 가나 {kana_count}자 검출 — 발행 거부 (외국어 0자 정책)")
         return None, None
-    # 한자 임계값 강화 — 한국어 글에 한자는 거의 안 써야. 5자 이상 검출 시 거부
-    # (정두릅 결정 2026-05: "截圖" 같은 중국어/한자 섞임 차단)
     hanja_count = sum(
-        1 for ch in plain_for_lang
+        1 for ch in check_text
         if 0x4E00 <= ord(ch) <= 0x9FFF
     )
-    if hanja_count >= 5:
-        log(f"   🚫 한자 {hanja_count}자 검출 — 발행 거부")
+    if hanja_count > 0:
+        log(f"   🚫 한자 {hanja_count}자 검출 — 발행 거부 (외국어 0자 정책)")
         return None, None
 
     # ★ 사진 설명 사설 제거 ★
@@ -3873,13 +3874,40 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
         m = re.search(r"\{.*\}", txt, re.DOTALL)
         if m:
             txt = m.group(0)
-        data = json.loads(txt)
+        # JSON 파싱 강화 — Llama가 body 안에 raw 따옴표/줄바꿈 박는 사고 회복
+        # (정두릅 결정 2026-06: 마인크래프트 같은 case의 Unterminated string 사고 차단)
+        try:
+            data = json.loads(txt, strict=False)
+        except json.JSONDecodeError:
+            cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", txt)
+            try:
+                data = json.loads(cleaned, strict=False)
+            except json.JSONDecodeError:
+                # body 안의 raw " 를 \" 로 escape (가장 흔한 깨짐 패턴)
+                escaped = re.sub(
+                    r'("body"\s*:\s*")(.*?)("\s*,\s*"tags")',
+                    lambda mo: mo.group(1) + mo.group(2).replace('"', '\\"') + mo.group(3),
+                    cleaned,
+                    flags=re.DOTALL,
+                )
+                data = json.loads(escaped, strict=False)
         title_n = (data.get("title") or orig_title)[:40]
         body_n = (data.get("body") or "").strip()
         tags = data.get("tags") or []
         tags = [str(t).strip().lstrip("#") for t in tags if t][:10]
         if not body_n:
             raise ValueError("empty body from gemini")
+
+        # ★ 네이버 윤색본 한자·가나·외국어 절대 0자 강제 ★
+        # (정두릅 결정 2026-06: 포트나이트 글 중국어 사고 — AI 발행 적발 위험 100%)
+        # 제목 + 본문 + 태그 통째로 검사
+        check_text = title_n + body_n + " ".join(tags)
+        hanja_count = sum(1 for ch in check_text if 0x4E00 <= ord(ch) <= 0x9FFF)
+        kana_count = sum(1 for ch in check_text if 0x3040 <= ord(ch) <= 0x30FF)
+        if hanja_count > 0 or kana_count > 0:
+            log(f"   🚫 네이버 윤색본 외국어 검출 (한자 {hanja_count}자 / 가나 {kana_count}자) → 거부")
+            return None
+
         return {
             "title": title_n,
             "body": body_n,
