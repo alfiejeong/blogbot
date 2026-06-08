@@ -2318,14 +2318,18 @@ VISION_VERIFY_ENABLED = (
     os.environ.get("VISION_VERIFY_DISABLED", "").strip()
     not in {"1", "true", "yes"}
 )
-VISION_VERIFY_THRESHOLD = 6  # 기본 임계값 (인물·sports·entertainment)
-# 카테고리별 임계값 — 핫플/맛집은 실제 가게 사진이 핵심이지만 너무 빡세면 통과율 ↓
-# (정두릅 결정 2026-05: 7→6 완화. 경계 케이스 통과시켜 발행률 올림)
+VISION_VERIFY_THRESHOLD = 6  # 기본 임계값 (entertainment 인물용)
+# 카테고리별 임계값 — game/it/auto/sports는 wikimedia에 정확한 사진 적어 6 너무 빡셈.
+# 캡션-키워드 매칭은 이미 통과한 상태라 Vision은 무관 사진 거르는 정도면 충분.
+# (정두릅 결정 2026-06: 발행 0건 사이클 다수 → game/it/auto/sports 4로 완화)
 VISION_THRESHOLDS_BY_CATEGORY = {
     "hotspot": 6,
     "restaurant": 6,
     "entertainment": 6,
-    "sports": 6,
+    "sports": 4,
+    "game": 4,
+    "it": 4,
+    "auto": 4,
 }
 
 
