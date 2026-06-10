@@ -39,6 +39,11 @@ GITHUB_PAGES_BASE = os.environ.get(
 # WP 업로드 시 deploy 지연 회피 위해 로컬 파일을 직접 읽는 데 사용.
 _IMAGE_LOCAL_PATHS = {}
 
+# 원본 이미지 URL → 재호스팅 결과 캐시.
+# 같은 원본을 두 번 호출해도 같은 결과 반환해서 중복 저장·중복 분배 차단.
+# (정두릅 결정 2026-06: 성유리·현대건설 글 같은 이미지 2~3번 박힌 사고)
+_REHOSTED_URL_CACHE = {}
+
 DB_DATA_URL = (
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vTMzfC-oh2JN4N2M7oAjQEDimJuI"
     "zWFmSHV2oa9tnC5raeTe5x6qfQ9xKR18iqZL1xI6ZdmaDeWOLWa/pub?gid=0&single=true&output=csv"
@@ -1893,6 +1898,11 @@ def rehost_image_to_wp(image_url, referer=None):
     # WP 대신 GitHub Pages(naver_drafts/images/YYYY-MM/)에 저장.
     # featured image(hero)는 upload_featured_image가 _IMAGE_LOCAL_PATHS에서 로컬 파일 읽어
     # WP에 한 장만 업로드 — deploy 지연 무관.
+
+    # ★ 같은 원본 URL은 한 번만 처리 — 중복 분배 차단 ★
+    if image_url in _REHOSTED_URL_CACHE:
+        return _REHOSTED_URL_CACHE[image_url]
+
     try:
         from PIL import Image
         from io import BytesIO
@@ -1904,6 +1914,7 @@ def rehost_image_to_wp(image_url, referer=None):
             h["Referer"] = referer
         rr = requests.get(image_url, headers=h, timeout=15)
         if rr.status_code != 200 or len(rr.content) < 15_000:
+            _REHOSTED_URL_CACHE[image_url] = (None, None)
             return None, None
 
         # Pillow로 압축 — 폭 1200 / JPEG 품질 80 (평균 500KB → 150KB)
@@ -1940,9 +1951,12 @@ def rehost_image_to_wp(image_url, referer=None):
         # upload_featured_image가 deploy 지연 회피 위해 로컬 파일 직접 읽도록 매핑 저장
         _IMAGE_LOCAL_PATHS[pages_url] = file_path
         log(f"   📦 GitHub Pages 저장: {len(img_bytes)//1024}KB → images/{ym}/{filename}")
+        # 원본 URL → 결과 캐시 (다음 호출 시 중복 저장 차단)
+        _REHOSTED_URL_CACHE[image_url] = (None, pages_url)
         return None, pages_url
     except Exception as e:
         log(f"   GitHub Pages 재호스팅 실패: {str(e)[:80]}")
+    _REHOSTED_URL_CACHE[image_url] = (None, None)
     return None, None
 
 
@@ -3152,10 +3166,11 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         if not title:
             title = style_example.strip('"').format(kw=kw)
 
-    # 본문 너무 짧으면 (응답이 잘림) None 반환 → 발행 스킵
+    # 본문 너무 짧으면 (응답이 잘림 또는 빈약한 글) None 반환 → 발행 스킵
+    # (정두릅 결정 2026-06: 닌텐도 스위치 2 글 너무 짧음 사례 → 200 → 350자로 강화)
     plain_text_len = len(re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content))
-    if plain_text_len < 200:
-        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자) — 응답 잘림 의심, 스킵")
+    if plain_text_len < 350:
+        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 350) — 빈약/잘림 의심, 스킵")
         return None, None
 
     # H2가 충분히 안 들어왔으면(잘린 글) 스킵
@@ -3164,24 +3179,34 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         log(f"   ⚠️ H2 헤딩 {h2_count}개만 — 글 구조 미완, 스킵")
         return None, None
 
-    # ★ 외국어 0자 강제 — 한자·가나 1자라도 검출 시 즉시 거부 ★
-    # (정두릅 결정 2026-06: 포트나이트 네이버 드래프트 중국어 사고 — AI 적발 위험 100%)
-    # 제목 + 본문 통째로 검사
+    # ★ 외국어 0자 강제 — 한글·영문·숫자·구두점 외 모든 외국 문자 차단 ★
+    # (정두릅 결정 2026-06: 마인크래프트 글 러시아어 사고로 확장. 한자/가나/키릴/아랍/태국 등 0자)
     plain_for_lang = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content)
     check_text = title + plain_for_lang
-    kana_count = sum(
-        1 for ch in check_text
-        if 0x3040 <= ord(ch) <= 0x30FF  # 히라가나 + 카타카나
-    )
-    if kana_count > 0:
-        log(f"   🚫 일본어 가나 {kana_count}자 검출 — 발행 거부 (외국어 0자 정책)")
-        return None, None
-    hanja_count = sum(
-        1 for ch in check_text
-        if 0x4E00 <= ord(ch) <= 0x9FFF
-    )
-    if hanja_count > 0:
-        log(f"   🚫 한자 {hanja_count}자 검출 — 발행 거부 (외국어 0자 정책)")
+    foreign_counts = {"hanja": 0, "kana": 0, "cyrillic": 0, "arabic": 0, "thai": 0,
+                      "devanagari": 0, "hebrew": 0, "greek": 0}
+    for ch in check_text:
+        cp = ord(ch)
+        if 0x4E00 <= cp <= 0x9FFF:
+            foreign_counts["hanja"] += 1
+        elif 0x3040 <= cp <= 0x30FF:
+            foreign_counts["kana"] += 1
+        elif 0x0400 <= cp <= 0x04FF:
+            foreign_counts["cyrillic"] += 1
+        elif 0x0600 <= cp <= 0x06FF:
+            foreign_counts["arabic"] += 1
+        elif 0x0E00 <= cp <= 0x0E7F:
+            foreign_counts["thai"] += 1
+        elif 0x0900 <= cp <= 0x097F:
+            foreign_counts["devanagari"] += 1
+        elif 0x0590 <= cp <= 0x05FF:
+            foreign_counts["hebrew"] += 1
+        elif 0x0370 <= cp <= 0x03FF:
+            foreign_counts["greek"] += 1
+    total_foreign = sum(foreign_counts.values())
+    if total_foreign > 0:
+        detail = ", ".join(f"{k}={v}" for k, v in foreign_counts.items() if v > 0)
+        log(f"   🚫 외국 문자 검출 ({detail}) — 발행 거부 (외국어 0자 정책)")
         return None, None
 
     # ★ 사진 설명 사설 제거 ★
@@ -3925,14 +3950,27 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
         if not body_n:
             raise ValueError("empty body from gemini")
 
-        # ★ 네이버 윤색본 한자·가나·외국어 절대 0자 강제 ★
-        # (정두릅 결정 2026-06: 포트나이트 글 중국어 사고 — AI 발행 적발 위험 100%)
-        # 제목 + 본문 + 태그 통째로 검사
+        # ★ 네이버 윤색본 외국어 절대 0자 강제 — 한자·가나·키릴·아랍·태국 등 모두 ★
+        # (정두릅 결정 2026-06: 마인크래프트 글 러시아어 사고로 확장)
         check_text = title_n + body_n + " ".join(tags)
-        hanja_count = sum(1 for ch in check_text if 0x4E00 <= ord(ch) <= 0x9FFF)
-        kana_count = sum(1 for ch in check_text if 0x3040 <= ord(ch) <= 0x30FF)
-        if hanja_count > 0 or kana_count > 0:
-            log(f"   🚫 네이버 윤색본 외국어 검출 (한자 {hanja_count}자 / 가나 {kana_count}자) → 거부")
+        foreign_blocks = [
+            ("hanja", 0x4E00, 0x9FFF),       # 한자
+            ("kana", 0x3040, 0x30FF),         # 가나
+            ("cyrillic", 0x0400, 0x04FF),     # 러시아어
+            ("arabic", 0x0600, 0x06FF),       # 아랍어
+            ("thai", 0x0E00, 0x0E7F),         # 태국어
+            ("devanagari", 0x0900, 0x097F),   # 힌디
+            ("hebrew", 0x0590, 0x05FF),       # 히브리어
+            ("greek", 0x0370, 0x03FF),        # 그리스어
+        ]
+        detected = {}
+        for name, lo, hi in foreign_blocks:
+            c = sum(1 for ch in check_text if lo <= ord(ch) <= hi)
+            if c > 0:
+                detected[name] = c
+        if detected:
+            detail = ", ".join(f"{k}={v}" for k, v in detected.items())
+            log(f"   🚫 네이버 윤색본 외국 문자 검출 ({detail}) → 거부")
             return None
 
         return {
