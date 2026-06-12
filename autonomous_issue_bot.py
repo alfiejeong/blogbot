@@ -551,21 +551,28 @@ def build_keyword_pool(d_df):
     # 1) 트렌드 RSS — 25개로 확대 시도 (실제로는 시간대 따라 10~25개)
     pool.extend(get_google_trends()[:25])
 
-    # 2) 트렌드 RSS가 15개 미만이면 화이트리스트로 보충 — 25개 목표
-    CATEGORY_WHITELIST = [
-        # ★ 월드컵 시즌 강화 (정두릅 결정 2026-06: 트래픽 공략) ★
-        # 대회·라운드
+    # 2-A) 월드컵 시즌 강제 픽업 — 매 사이클 항상 N개 보장 (트렌드 RSS 개수 무관)
+    # 정두릅 결정 2026-06: 월드컵 트래픽 공략. 시즌 끝나면 이 블록 제거.
+    WORLDCUP_PRIORITY = [
         "FIFA 월드컵", "북중미 월드컵", "월드컵 조별리그", "월드컵 16강",
         "월드컵 8강", "월드컵 4강", "월드컵 결승",
-        # 한국 대표팀·핵심 선수 (동명이인 적은 슈퍼스타 위주)
         "한국 축구 국가대표팀", "손흥민", "이강인", "김민재", "황희찬",
         "조규성", "황인범", "이재성", "조현우",
-        # 해외 슈퍼스타
         "리오넬 메시", "킬리안 음바페", "크리스티아누 호날두", "엘링 홀란",
-        "주드 벨링엄", "비니시우스 주니어", "라민 야말", "주앙 펠릭스",
-        # 강팀·라이벌
+        "주드 벨링엄", "비니시우스 주니어", "라민 야말",
         "브라질 대표팀", "아르헨티나 대표팀", "프랑스 대표팀", "독일 대표팀",
         "스페인 대표팀", "잉글랜드 대표팀", "포르투갈 대표팀", "일본 대표팀",
+    ]
+    # 매 사이클 5개 강제 픽업 (중복 차단으로 자연 회전)
+    wc_candidates = [k for k in WORLDCUP_PRIORITY if k not in pool]
+    random.shuffle(wc_candidates)
+    wc_boost = wc_candidates[:5]
+    pool.extend(wc_boost)
+    if wc_boost:
+        log(f"   ⚽ 월드컵 강제 픽업 {len(wc_boost)}개: {wc_boost}")
+
+    # 2-B) 트렌드 RSS가 15개 미만이면 화이트리스트로 보충 — 25개 목표
+    CATEGORY_WHITELIST = [
         # 게임 — 화제 작품·플랫폼
         "젤다의 전설", "엘든링", "GTA 6", "닌텐도 스위치 2", "PS6",
         "스팀덱", "발더스 게이트 3", "디아블로 4", "원신", "팰월드",
@@ -595,6 +602,28 @@ def build_keyword_pool(d_df):
     pool = [k for k in pool if not any(b in k for b in BANNED_TIME_SENSITIVE)]
     if len(pool) < before:
         log(f"   🚫 시기 민감 키워드 {before - len(pool)}개 제거")
+
+    # ★ 외국 문자 키워드 자동 제거 (정두릅 결정 2026-06) ★
+    # "южная корея – чехия", "ตรวจหวย", "พยากรณ์อากาศ" 같은 키릴·태국·아랍 등
+    # 한글·영어·숫자 외 외국 문자 1자라도 들어간 키워드는 풀에서 제거 (quota 낭비 차단)
+    def _has_foreign_chars(k):
+        for ch in k:
+            cp = ord(ch)
+            if (0x4E00 <= cp <= 0x9FFF or       # 한자
+                0x3040 <= cp <= 0x30FF or       # 가나
+                0x0400 <= cp <= 0x04FF or       # 키릴 (러시아어)
+                0x0600 <= cp <= 0x06FF or       # 아랍
+                0x0E00 <= cp <= 0x0E7F or       # 태국어
+                0x0900 <= cp <= 0x097F or       # 힌디
+                0x0590 <= cp <= 0x05FF or       # 히브리
+                0x0370 <= cp <= 0x03FF):        # 그리스
+                return True
+        return False
+    before = len(pool)
+    foreign_removed = [k for k in pool if _has_foreign_chars(k)]
+    pool = [k for k in pool if not _has_foreign_chars(k)]
+    if foreign_removed:
+        log(f"   🚫 외국어 키워드 {len(foreign_removed)}개 제거: {foreign_removed[:5]}")
 
     # 광범위 지역 단독 키워드 제거 — 핫플 폐지 정책상 그냥 SKIP될 것
     GENERIC_LOC_PATTERNS = [
