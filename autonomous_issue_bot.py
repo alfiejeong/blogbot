@@ -113,10 +113,12 @@ def _call_groq(contents, label=""):
         prompt = str(contents)
 
     # Groq 모델 폴백 체인 — 각 모델은 한도 독립이라 분산 효과
+    # (정두릅 결정 2026-06: 8b는 413 Payload Too Large, gpt-oss-20b는 빈 응답 사고 다발)
+    # → 안정적인 70b 모델 위주로 재구성
     GROQ_MODELS = [
-        "llama-3.3-70b-versatile",      # 메인 (품질 좋음)
-        "llama-3.1-8b-instant",          # 가벼움, 빠름
-        "openai/gpt-oss-20b",            # 다른 계열, 한도 독립
+        "llama-3.3-70b-versatile",         # 메인 (품질 좋음)
+        "llama-3.1-70b-versatile",         # 70b 다른 버전 — 한도 독립
+        "mixtral-8x7b-32768",              # context 32K, 본문 생성에 충분
     ]
 
     last_err = None
@@ -553,17 +555,24 @@ def build_keyword_pool(d_df):
 
     # 2-A) 월드컵 시즌 강제 픽업 — 매 사이클 항상 N개 보장 (트렌드 RSS 개수 무관)
     # 정두릅 결정 2026-06: 월드컵 트래픽 공략. 시즌 끝나면 이 블록 제거.
+    # 정두릅 결정 2026-06: 광범위 키워드("FIFA 월드컵")는 7일 한 번 발행 후 차단 → 효율 ↓
+    # 선수·국가 위주로 정밀화. 매일 다른 인물·매치로 7일 회전 풍부하게.
     WORLDCUP_PRIORITY = [
-        "FIFA 월드컵", "북중미 월드컵", "월드컵 조별리그", "월드컵 16강",
-        "월드컵 8강", "월드컵 4강", "월드컵 결승",
-        "한국 축구 국가대표팀", "손흥민", "이강인", "김민재", "황희찬",
-        "조규성", "황인범", "이재성", "조현우",
+        # 한국 핵심 선수 (슈퍼스타 위주, 동명이인 차단 완화로 다 통과 가능)
+        "손흥민", "이강인", "김민재", "황희찬", "조규성", "황인범",
+        "이재성", "조현우", "정우영", "백승호", "오현규", "엄지성",
+        # 해외 슈퍼스타
         "리오넬 메시", "킬리안 음바페", "크리스티아누 호날두", "엘링 홀란",
-        "주드 벨링엄", "비니시우스 주니어", "라민 야말",
+        "주드 벨링엄", "비니시우스 주니어", "라민 야말", "쥐드 벨링엄",
+        "주앙 펠릭스", "라파엘 레앙", "페드리", "가비",
+        # 강팀
         "브라질 대표팀", "아르헨티나 대표팀", "프랑스 대표팀", "독일 대표팀",
         "스페인 대표팀", "잉글랜드 대표팀", "포르투갈 대표팀", "일본 대표팀",
+        "네덜란드 대표팀", "벨기에 대표팀", "이탈리아 대표팀", "우루과이 대표팀",
+        # 라운드는 시즌 진행 시점에만 의미 — 1개만 유지
+        "북중미 월드컵",
     ]
-    # 매 사이클 5개 강제 픽업 (중복 차단으로 자연 회전)
+    # 매 사이클 5개 강제 픽업 (선수·국가 위주라 7일 회전 풍부)
     wc_candidates = [k for k in WORLDCUP_PRIORITY if k not in pool]
     random.shuffle(wc_candidates)
     wc_boost = wc_candidates[:5]
@@ -812,16 +821,31 @@ def detect_homonym_keyword(kw, news_items):
         "방송": ["아나운서", "기자"],
         "법조": ["변호사", "판사", "검사"],
     }
-    fields_seen = set()
     blob = " ".join(
         (it.get("title", "") + " " + it.get("desc", "")) for it in news_items[:8]
     )
+    # 분야별 점수 카운트 (단순 set이 아닌 빈도)
+    # (정두릅 결정 2026-06: 황희찬·조규성 슈퍼스타가 "회장/MC" 우연 매치로 차단되는 사고 회복)
+    field_counts = {}
     for field, hints in field_signals.items():
-        if any(h in blob for h in hints):
-            fields_seen.add(field)
-    # 서로 다른 분야가 2개 이상 → 동명이인 모호 키워드
-    if len(fields_seen) >= 2:
-        log(f"   ⚠️ 동명이인 감지 ({len(fields_seen)}개 분야: {fields_seen})")
+        count = sum(blob.count(h) for h in hints)
+        if count > 0:
+            field_counts[field] = count
+
+    if not field_counts:
+        return False
+
+    # 1순위 분야가 전체의 60% 이상이면 그 분야 단일 인물로 판단 → 통과
+    total = sum(field_counts.values())
+    sorted_fields = sorted(field_counts.items(), key=lambda x: -x[1])
+    top_field, top_count = sorted_fields[0]
+    if total > 0 and top_count / total >= 0.6:
+        log(f"   ✓ 동명이인 OFF: {top_field} 압도적 ({top_count}/{total}) — 단일 인물 판정")
+        return False
+
+    # 그 외 2분야 이상 비등이면 동명이인 모호
+    if len(field_counts) >= 2:
+        log(f"   ⚠️ 동명이인 감지 ({len(field_counts)}개 분야: {field_counts})")
         return True
     return False
 
