@@ -112,12 +112,11 @@ def _call_groq(contents, label=""):
     else:
         prompt = str(contents)
 
-    # Groq 모델 폴백 체인 — 실제 작동하는 모델만 (정두릅 결정 2026-06)
-    # llama-3.1-70b·mixtral-8x7b는 deprecated(HTTP 400). 검증된 모델로 재구성.
+    # Groq 모델 폴백 체인 — llama3-70b·gemma2도 deprecated(HTTP 400) 확인됨
+    # 직전 deprecated 사고 학습: 검증된 모델만 남김
     GROQ_MODELS = [
         "llama-3.3-70b-versatile",   # 메인 — 안정적, 큰 context
-        "llama3-70b-8192",            # 70b 다른 버전 (8K context, 모든 호출 충분)
-        "gemma2-9b-it",               # 가벼운 보조 모델
+        "llama-3.1-8b-instant",       # 빠른 폴백 (본문 큰 입력 시 413 위험 있지만 분류·짧은 호출은 OK)
     ]
 
     last_err = None
@@ -571,10 +570,35 @@ def build_keyword_pool(d_df):
         # 라운드는 시즌 진행 시점에만 의미 — 1개만 유지
         "북중미 월드컵",
     ]
-    # 매 사이클 5개 강제 픽업 (선수·국가 위주라 7일 회전 풍부)
+    # 매 사이클 픽업 — 뉴스 빈도 기반 우선 + 셔플 보완
+    # (정두릅 결정 2026-06: 손흥민·황인범 등 골 넣은 선수가 자동 우선 픽업되도록)
     wc_candidates = [k for k in WORLDCUP_PRIORITY if k not in pool]
-    random.shuffle(wc_candidates)
-    wc_boost = wc_candidates[:5]
+
+    # 월드컵 관련 최신 뉴스 가져와서 빈도 분석
+    hot_picks = []
+    try:
+        news_items = fetch_naver_news_items("월드컵", display=20) or []
+        blob = " ".join(
+            (it.get("title", "") + " " + it.get("desc", ""))
+            for it in news_items
+        )
+        # 각 후보가 뉴스에 몇 번 등장하는지 카운트
+        scored = []
+        for k in wc_candidates:
+            count = blob.count(k)
+            if count > 0:
+                scored.append((k, count))
+        scored.sort(key=lambda x: -x[1])
+        hot_picks = [k for k, c in scored[:3]]  # 빈도 상위 3개
+        if hot_picks:
+            log(f"   🔥 월드컵 뉴스 빈도 상위: {[(k, dict(scored)[k]) for k in hot_picks]}")
+    except Exception as e:
+        log(f"   월드컵 뉴스 빈도 분석 실패: {str(e)[:60]}")
+
+    # 빈도 상위 3개 + 셔플 2개 (시즌 풍부함 유지)
+    remaining = [k for k in wc_candidates if k not in hot_picks]
+    random.shuffle(remaining)
+    wc_boost = hot_picks + remaining[:max(0, 5 - len(hot_picks))]
     pool.extend(wc_boost)
     if wc_boost:
         log(f"   ⚽ 월드컵 강제 픽업 {len(wc_boost)}개: {wc_boost}")
@@ -2421,7 +2445,8 @@ VISION_THRESHOLDS_BY_CATEGORY = {
     "hotspot": 6,
     "restaurant": 6,
     "entertainment": 6,
-    "sports": 4,
+    # 정두릅 결정 2026-06 (월드컵 시즌): sports 이미지 더 공격적
+    "sports": 2,
     "game": 4,
     "it": 4,
     "auto": 4,
@@ -3248,10 +3273,10 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
             title = style_example.strip('"').format(kw=kw)
 
     # 본문 너무 짧으면 (응답이 잘림 또는 빈약한 글) None 반환 → 발행 스킵
-    # (정두릅 결정 2026-06: 닌텐도 스위치 2 글 너무 짧음 사례 → 200 → 350자로 강화)
+    # (정두릅 결정 2026-06: Llama가 quota로 짧게 응답하는 사고 → 350 → 250자 완화)
     plain_text_len = len(re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content))
-    if plain_text_len < 350:
-        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 350) — 빈약/잘림 의심, 스킵")
+    if plain_text_len < 250:
+        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 250) — 빈약/잘림 의심, 스킵")
         return None, None
 
     # H2가 충분히 안 들어왔으면(잘린 글) 스킵
