@@ -64,7 +64,10 @@ TOTAL_IMAGES = 3
 # 대표 이미지(featured_media)는 워드프레스 테마가 글 상단에 자동 노출.
 # 본문 H2 사이에는 hero 외의 이미지(images[1:])만 분배 → 대표·본문 이미지 중복 방지.
 # 사용자 정책: 대표 이미지 ≠ 본문 이미지.
-THEME_AUTO_FEATURED_IMAGE = True
+# 정두릅 결정 2026-06: cafe24 디스크 가득 사고로 hero를 WP에 업로드 안 함.
+# featured_media 없이 발행하므로 hero를 본문 최상단에 직접 박아야 함.
+# → False로 변경 (theme의 featured 자동 렌더 X)
+THEME_AUTO_FEATURED_IMAGE = False
 
 # 무관한 stock photo 사고 차단 — Unsplash·Pexels·Picsum 전면 비활성.
 # 사용자 정책: stock photo가 글의 신뢰도를 깎는다. 진짜 사진만 쓴다.
@@ -3732,19 +3735,22 @@ def build_intro(kw, hero_img, category):
 
 # --- [9. 워드프레스 발행 ] ---
 def upload_featured_image(img):
-    # 이미 WP 미디어로 재호스팅된 이미지(언론)면 id 그대로 재사용
+    # 정두릅 결정 2026-06: cafe24 디스크 가득 사고 반복(126B 사고) → hero도 WP 업로드 X.
+    # GitHub Pages에 이미 저장된 URL을 그대로 사용. WP featured_media는 None으로 보냄.
+    # 본문 최상단에 hero figure를 직접 박아 hero 표시 유지.
+    # → cafe24 디스크 부담 영구히 0.
     if img.get("wp_id"):
         return img["wp_id"]
+    # 더 이상 WP에 업로드하지 않고 항상 None 반환 → featured_media 없이 발행
+    return None
+    # ↓ 아래 코드는 비활성 (역참조 위해 보존)
     try:
-        # 정두릅 결정 2026-05: 본문 이미지는 GitHub Pages 호스팅. featured만 WP 업로드.
-        # 1순위 — 로컬 파일에서 직접 읽기 (deploy 지연 시 URL 다운로드 404 회피)
         url = img.get("url", "")
         local_path = _IMAGE_LOCAL_PATHS.get(url)
         if local_path and os.path.exists(local_path):
             with open(local_path, "rb") as f:
                 binary = f.read()
         else:
-            # 2순위 — URL로 다운로드 (외부 URL 직접 사용 케이스)
             binary = requests.get(url, timeout=12).content
         filename = f"hero_{int(time.time())}.jpg"
         headers = {
@@ -4737,12 +4743,11 @@ def run_bot():
             # 모바일 래퍼(line-height/word-break/font-size)로 전체 감싸기
             full_html = wrap_post_for_mobile(intro_html + article_html + trailer)
 
-            # ⑦ 피처드 이미지 업로드 + 카테고리 매핑 + 자동 태그 + 발행
-            # hero 재정렬 결과(images_for_hero[0])를 사용 — 핫플/맛집 지도 사진 회피
-            featured_id = upload_featured_image(images_for_hero[0])
-            if not featured_id:
-                log("   ⛔ 대표 이미지 업로드 실패 — 발행 스킵 (대표 이미지 무조건 보장)")
-                continue
+            # ⑦ 카테고리 매핑 + 자동 태그 + 발행
+            # 정두릅 결정 2026-06: hero를 WP 업로드 X. GitHub Pages 호스팅 URL 그대로 사용.
+            # → cafe24 디스크 부담 0, "126B 업로드 사고" 영구 차단.
+            # hero는 build_intro에서 본문 최상단에 직접 박힘 (THEME_AUTO_FEATURED_IMAGE=False).
+            featured_id = None  # WP featured_media 비활성
             cat_id = resolve_category_id(info["category"])
             category_ids = [cat_id] if cat_id else None
             # 자동 태그: 키워드 + 카테고리 기본 + 뉴스 명사
