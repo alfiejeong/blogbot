@@ -1764,14 +1764,29 @@ def caption_matches_keyword(caption, kw):
     """
     캡션 텍스트에 키워드(또는 토큰) 중 하나라도 포함되는지.
     인물 키워드에서 '제3자 사진' 차단용. 한글 이름은 정확 매칭.
+
+    정두릅 결정 2026-06: 짧은 키워드(4자 이하)는 단어 경계 매칭 필수.
+    "페이즈"(LCK 선수) 키워드가 "페이즈3 성과공유회"(스타트업) 캡션에 잘못 매칭되는 사고 차단.
     """
     if not caption or not kw:
         return False
-    if kw in caption:
+
+    def _word_match(text, word):
+        """word가 text에 단어로 등장하는지 — 직후에 합성 한글/숫자 안 붙어야 함.
+        한 글자 조사(가/는/을/이/에/와/도/만/의/로/과/께/씨 등)는 단어 경계로 허용."""
+        if len(word) <= 4:
+            # 직후 문자가 숫자거나 한글 두 글자 이상 합성(예: '페이즈3', '페이즈코드')이면 차단
+            # 단 한 글자 조사(가/는/을/이/에/도/만/의/로/과/께/씨) + 공백·종결은 통과
+            # 패턴: word 직후가 (숫자) 또는 (한글 + 한글) 또는 (영문 + 영문)이면 차단
+            pattern = re.escape(word) + r"(?![0-9]|[가-힣][가-힣]|[A-Za-z][A-Za-z])"
+            return bool(re.search(pattern, text))
+        return word in text
+
+    if _word_match(caption, kw):
         return True
     tokens = [t for t in re.split(r"\s+", kw.strip())
               if len(t) >= 2 and t not in {"의", "그", "이", "저", "것", "수"}]
-    return any(t in caption for t in tokens)
+    return any(_word_match(caption, t) for t in tokens)
 
 
 # 매니지먼트사/기획사/소속사 단서 — 이게 캡션에 있으면 본인 사진 가능성 매우 높음
