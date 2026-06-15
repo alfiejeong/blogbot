@@ -543,12 +543,72 @@ def discover_trending_places_from_blogs(d_df, target=3):
         return []
 
 
+def get_news_trending_keywords(candidate_pool, per_seed_top=2, min_count=2):
+    """
+    네이버 뉴스 검색 API + 빈도 분석으로 카테고리별 핫 키워드 추출.
+    정두릅 결정 2026-06:
+    - Google Trends RSS는 정치·주식·재해에 치우침 → 엔터·게임·IT·자동차 보강
+    - 후보 풀(화이트리스트 + KNOWN_*) 중 뉴스 헤드라인에 자주 등장하는 것만 픽업
+    - 월드컵 빈도 분석과 동일 매커니즘 (이미 검증됨)
+    비용: 호출당 ~7회 네이버 뉴스 API (1일 quota 25,000 중 ~170회 사용)
+    """
+    CATEGORY_SEEDS = [
+        ("entertainment", "K팝 아이돌"),
+        ("entertainment", "드라마 출연"),
+        ("sports", "프로야구 KBO"),
+        ("sports", "K리그 축구"),
+        ("game", "신작 게임 출시"),
+        ("it", "AI 신제품"),
+        ("auto", "신차 출시"),
+    ]
+
+    picks_log = []
+    found = []
+    seen = set()
+    for cat, seed in CATEGORY_SEEDS:
+        try:
+            items = fetch_naver_news_items(seed, display=15) or []
+            if not items:
+                continue
+            blob = " ".join(
+                (it.get("title", "") + " " + it.get("desc", ""))
+                for it in items
+            )
+            scored = []
+            for k in candidate_pool:
+                if len(k) < 2:
+                    continue
+                c = blob.count(k)
+                if c >= min_count:
+                    scored.append((k, c))
+            scored.sort(key=lambda x: -x[1])
+            top = []
+            for k, c in scored:
+                if k in seen:
+                    continue
+                top.append((k, c))
+                if len(top) >= per_seed_top:
+                    break
+            for k, c in top:
+                seen.add(k)
+                found.append(k)
+                picks_log.append(f"{cat}:{k}({c})")
+        except Exception as e:
+            log(f"   📰 {cat}/{seed} 빈도 분석 실패: {str(e)[:60]}")
+
+    if picks_log:
+        log(f"   📰 뉴스 빈도 핫: {', '.join(picks_log)}")
+    return found
+
+
 def build_keyword_pool(d_df):
     """
-    구글 트렌드 RSS + 카테고리별 화이트리스트 보충.
+    구글 트렌드 RSS + 카테고리별 화이트리스트 보충 + 뉴스 빈도 기반 핫 픽업.
     정두릅 결정 2026-05:
     - Google Trends RSS는 시간대마다 5~25개 변동
-    - 부족할 때 게임/IT/자동차 인기 키워드로 보충 (7일 중복 차단으로 자연 회전)
+    - 부족할 때 게임/IT/자동차 인기 키워드로 보충 (3일 중복 차단으로 자연 회전)
+    정두릅 결정 2026-06:
+    - 뉴스 빈도 기반 카테고리 핫 픽업 추가 (Google Trends 보완)
     """
     pool = []
     # 1) 트렌드 RSS — 25개로 확대 시도 (실제로는 시간대 따라 10~25개)
@@ -570,8 +630,13 @@ def build_keyword_pool(d_df):
         "브라질 대표팀", "아르헨티나 대표팀", "프랑스 대표팀", "독일 대표팀",
         "스페인 대표팀", "잉글랜드 대표팀", "포르투갈 대표팀", "일본 대표팀",
         "네덜란드 대표팀", "벨기에 대표팀", "이탈리아 대표팀", "우루과이 대표팀",
-        # 라운드는 시즌 진행 시점에만 의미 — 1개만 유지
-        "북중미 월드컵",
+        # 정두릅 결정 2026-06: 광범위 키워드("북중미 월드컵")는 1회 발행 후 3일간 풀 한 자리 차지 → 제거
+        # 한국 추가 선수 (시즌 진행 중 화제 인물)
+        "정상빈", "엄원상", "박용우", "권창훈", "송민규",
+        # 해외 추가 슈퍼스타
+        "케일러 나바스", "라우타로 마르티네스", "줄리안 알바레스",
+        "필 포든", "부카요 사카", "콜 팔머", "디오고 조타",
+        "케빈 더 브라위너", "케말 데미랄", "다비드 하벨란",
     ]
     # 매 사이클 픽업 — 뉴스 빈도 기반 우선 + 셔플 보완
     # (정두릅 결정 2026-06: 손흥민·황인범 등 골 넣은 선수가 자동 우선 픽업되도록)
@@ -613,18 +678,50 @@ def build_keyword_pool(d_df):
         "스팀덱", "발더스 게이트 3", "디아블로 4", "원신", "팰월드",
         "마인크래프트", "로블록스", "포트나이트", "리그 오브 레전드",
         "오버워치 2", "스타크래프트", "스플래툰 3", "젤다 야숨",
+        # 게임 추가
+        "스타필드", "사이버펑크 2077", "발로란트", "에이펙스 레전드",
+        "콜 오브 듀티", "스플린터 셀", "메탈기어 솔리드",
+        "데스 스트랜딩", "호라이즌 포비든 웨스트", "갓 오브 워",
+        "스파이더맨", "더 라스트 오브 어스", "엘리시움",
         # IT — 신상 제품·서비스
         "갤럭시 S25", "갤럭시 Z 플립7", "갤럭시 Z 폴드7", "아이폰 17",
         "맥북 프로 M5", "아이패드 프로", "에어팟 프로 3",
         "챗GPT", "구글 제미니", "메타 AI", "클로드", "퍼플렉시티",
+        # IT 추가
+        "애플 비전 프로", "메타 퀘스트 3", "갤럭시 워치 7",
+        "갤럭시 버즈 3", "삼성 갤럭시 탭", "LG 그램", "마이크로소프트 코파일럿",
+        "오픈AI", "Sora", "GitHub Copilot", "노션 AI",
         # 자동차 — 신차·전기차
         "테슬라 모델 Y", "현대 아이오닉 9", "기아 EV5", "현대 캐스퍼 EV",
         "BMW i5", "벤츠 EQE", "BYD 아토 3", "포르쉐 타이칸",
         "현대 아반떼", "기아 카니발", "쏘렌토 하이브리드",
+        # 자동차 추가
+        "현대 그랜저", "기아 K5", "기아 K9", "제네시스 GV80",
+        "제네시스 G90", "테슬라 사이버트럭", "BMW X5", "벤츠 G클래스",
+        "아우디 e-tron", "볼보 EX30", "BYD 씰", "리비안 R1T",
+        "현대 산타페", "기아 셀토스",
     ]
+
+    # 2-C) 뉴스 빈도 기반 카테고리 핫 픽업 (정두릅 결정 2026-06)
+    # 화이트리스트 + KNOWN_SPORTS + KNOWN_ENTERTAINMENT 중에서
+    # 지금 뉴스 헤드라인에 자주 뜨는 것 = "현재 화제" 우선 픽업
+    try:
+        news_candidate_pool = (
+            CATEGORY_WHITELIST
+            + list(globals().get("KNOWN_SPORTS", []))
+            + list(globals().get("KNOWN_ENTERTAINMENT", []))
+        )
+        news_picks = get_news_trending_keywords(news_candidate_pool)
+        news_picks = [k for k in news_picks if k not in pool]
+        if news_picks:
+            pool.extend(news_picks[:10])
+            log(f"   📰 뉴스 빈도 픽업 {len(news_picks[:10])}개 풀 추가")
+    except Exception as e:
+        log(f"   뉴스 빈도 픽업 실패: {str(e)[:80]}")
+
+    # 2-D) 풀이 여전히 부족하면 화이트리스트 랜덤 보충 (목표 25개)
     if len(pool) < 15:
         need = 25 - len(pool)
-        # 중복 제거 후 랜덤 픽업
         candidates = [k for k in CATEGORY_WHITELIST if k not in pool]
         random.shuffle(candidates)
         boost = candidates[:need]
@@ -4599,7 +4696,9 @@ def run_bot():
         d_df = None
 
     # 최근 7일치 제목 1회만 캐싱 (토큰 단위 중복 차단용)
-    recent_titles = get_recent_post_titles(days=7, limit=100)
+    # 정두릅 결정 2026-06: 7일 차단으로 풀 고갈 → 3일로 단축
+    # 황인범·손흥민·아이폰 17 같은 핵심 키워드를 3일에 한 번씩 갱신 발행
+    recent_titles = get_recent_post_titles(days=3, limit=100)
     log(f"🗂  최근 7일 제목 {len(recent_titles)}개 캐시 (중복 차단용)")
 
     keywords = build_keyword_pool(d_df)
