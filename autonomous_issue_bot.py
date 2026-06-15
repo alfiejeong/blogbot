@@ -163,76 +163,107 @@ def _call_groq(contents, label=""):
     ]
 
     last_err = None
-    for model_name in GROQ_MODELS:
-        try:
-            # 8B 모델은 context 작아서 (~6k 토큰) 본문 생성 시 413 위험 — prompt 절단
-            # 정두릅 결정 2026-06: 기아 카니발 글 8B 413 사고 → 8B 호출 시 prompt 3500자 제한
-            send_prompt = prompt
-            if "8b" in model_name and len(prompt) > 3500:
-                send_prompt = prompt[:3500] + "\n\n위 정보 바탕으로 자연스러운 한국어 글로 작성하라."
-                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 압축")
-            log(f"   🆘 Groq[{model_name}] 시도 ({label})")
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model_name,
-                    "messages": [{"role": "user", "content": send_prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 4000,
-                },
-                timeout=60,
-            )
-            r.raise_for_status()
-            text = r.json()["choices"][0]["message"]["content"]
+    for model_idx, model_name in enumerate(GROQ_MODELS):
+        # 정두릅 결정 2026-06: 8B context 매우 작음 — 3500자도 여전히 413 → 1800자로 추가 축소
+        # Korean 1자 ≈ 1 token, 1800자 입력 + max_tokens 2000 = ~3800 total, 8B 한도 안전
+        send_prompt = prompt
+        max_tok = 4000
+        if "8b" in model_name:
+            max_tok = 2000  # 출력도 절반으로
+            if len(prompt) > 1800:
+                send_prompt = prompt[:1800] + "\n\n위 정보 바탕으로 한국어 800자 내외 글 작성."
+                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 / max_tok={max_tok}")
+        # 정두릅 결정 2026-06: 70B 429는 TPM 분당 초과 — 30초 대기 후 1회 재시도 (다음 모델로 안 넘김)
+        retried_429 = False
+        move_to_next_model = False
+        while not move_to_next_model:
+            try:
+                log(f"   🆘 Groq[{model_name}] 시도 ({label})")
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": send_prompt}],
+                        "temperature": 0.7,
+                        "max_tokens": max_tok,
+                    },
+                    timeout=60,
+                )
+                r.raise_for_status()
+                text = r.json()["choices"][0]["message"]["content"]
 
-            # JSON 응답 기대되는 호출은 응답 정제 (raw 줄바꿈 등 처리)
-            if any(x in label for x in ("classify", "post", "naver-rewrite", "discover-places")):
-                try:
-                    cleaned = text
-                    cleaned = re.sub(r"```(?:json)?", "", cleaned).strip("`").strip()
-                    m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
-                    if m:
-                        cleaned = m.group(1)
-                    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
-                    data = json.loads(cleaned, strict=False)
-                    text = json.dumps(data, ensure_ascii=False)
-                except Exception as je:
-                    log(f"   Groq JSON 정제 실패 ({label}): {str(je)[:80]}")
-            # 분당 RPM 30 보호: 다음 호출 전 짧은 sleep으로 호출 분산
-            time.sleep(2)
-            return SimpleNamespace(text=text)
-        except requests.HTTPError as he:
-            last_err = he
-            status = getattr(he.response, "status_code", None)
-            if status == 429:
-                log(f"   ⚠️ Groq[{model_name}] 429 → 다음 모델로 분산")
-                time.sleep(1)
+                # JSON 응답 기대되는 호출은 응답 정제
+                if any(x in label for x in ("classify", "post", "naver-rewrite", "discover-places")):
+                    try:
+                        cleaned = text
+                        cleaned = re.sub(r"```(?:json)?", "", cleaned).strip("`").strip()
+                        m = re.search(r"(\{.*\}|\[.*\])", cleaned, re.DOTALL)
+                        if m:
+                            cleaned = m.group(1)
+                        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
+                        data = json.loads(cleaned, strict=False)
+                        text = json.dumps(data, ensure_ascii=False)
+                    except Exception as je:
+                        log(f"   Groq JSON 정제 실패 ({label}): {str(je)[:80]}")
+                time.sleep(2)
+                return SimpleNamespace(text=text)
+            except requests.HTTPError as he:
+                last_err = he
+                status = getattr(he.response, "status_code", None)
+                if status == 429:
+                    # 70B의 첫 429는 TPM 회복 기다리기 (30초)
+                    if "70b" in model_name and not retried_429:
+                        retried_429 = True
+                        log(f"   ⏳ Groq[{model_name}] 429 → 30초 대기 후 재시도 (TPM 회복)")
+                        time.sleep(30)
+                        continue  # while 루프 — 같은 모델 재시도
+                    log(f"   ⚠️ Groq[{model_name}] 429 → 다음 모델로 분산")
+                    time.sleep(1)
+                    move_to_next_model = True
+                    continue
+                log(f"   Groq[{model_name}] HTTP {status}: {str(he)[:60]}")
+                move_to_next_model = True
                 continue
-            log(f"   Groq[{model_name}] HTTP {status}: {str(he)[:60]}")
-            continue
-        except Exception as e:
-            last_err = e
-            log(f"   Groq[{model_name}] 예외: {str(e)[:60]}")
-            continue
+            except Exception as e:
+                last_err = e
+                log(f"   Groq[{model_name}] 예외: {str(e)[:60]}")
+                move_to_next_model = True
+                continue
     log(f"   Groq 모든 모델 실패 ({label}): {str(last_err)[:80] if last_err else 'unknown'}")
     return None
 
 
+# 정두릅 결정 2026-06: Gemini 일일 quota 완전 소진(limit: 0) 감지 시 즉시 Groq로
+# Gemini 모든 모델에 대해 5~30초씩 retry 낭비 차단. 회당 5+ 분 절약.
+_GEMINI_DAILY_QUOTA_DEAD = False
+
+
 def gemini_generate(contents, label="", prefer_lite=False):
     """
-    primary 모델에서 백오프 재시도 (3회), 끝까지 503이면 폴백 모델로.
+    primary 모델에서 백오프 재시도, 503이면 폴백 모델로.
     503/429/500/502/504/RESOURCE_EXHAUSTED 같은 일시적 에러만 retry.
     prefer_lite=True면 lite 모델부터 시도 — quota 부담 적은 호출(네이버 윤색 등)에 사용.
     Gemini 전체 체인이 다 실패하면 Groq Llama로 최후 폴백 (vision 호출은 제외).
+    정두릅 결정 2026-06:
+    - 'limit: 0' 감지되면 글로벌 flag 세팅 → 같은 사이클 내 후속 호출 Gemini 스킵
+    - retry 횟수 3 → 2, delay [2,5,10] → [1,3] 으로 단축 (quota 0일 때 시간 낭비 차단)
     """
-    delays_primary = [2, 5, 10]
+    global _GEMINI_DAILY_QUOTA_DEAD
+    # ━━ 단축 경로: 이미 daily quota 소진 확인됐으면 Gemini 시도 0번 → 바로 Groq ━━
+    if _GEMINI_DAILY_QUOTA_DEAD and label != "vision":
+        return _call_groq(contents, label=label)
+    if _GEMINI_DAILY_QUOTA_DEAD and label == "vision":
+        # Vision은 Groq 폴백 없음 → 즉시 None 효과 (재시도 낭비 차단)
+        from types import SimpleNamespace
+        return None
+
+    delays_primary = [1, 3]  # 줄임 — quota 0이면 어차피 안 됨
     last_err = None
     if prefer_lite:
-        # 가벼운 모델 우선 — 무거운 모델(flash)의 quota를 분류·본문 생성에 아끼기
         chain = [
             "gemini-2.5-flash-lite",
             "gemini-2.0-flash-lite",
@@ -243,7 +274,7 @@ def gemini_generate(contents, label="", prefer_lite=False):
         chain = MODEL_FALLBACK_CHAIN
     for model_idx, model in enumerate(chain):
         is_primary = (model_idx == 0)
-        retries = 3 if is_primary else 1  # primary는 3번, 폴백은 1번씩
+        retries = 2 if is_primary else 1  # primary 3→2번
         for attempt in range(retries):
             try:
                 if not is_primary and attempt == 0:
@@ -252,6 +283,15 @@ def gemini_generate(contents, label="", prefer_lite=False):
             except Exception as e:
                 last_err = e
                 err_str = str(e)
+                # ★ 일일 quota 소진 감지 — 'limit: 0' 또는 'PerDay' quota 위반
+                if "limit: 0" in err_str or "PerDayPerProject" in err_str:
+                    if not _GEMINI_DAILY_QUOTA_DEAD:
+                        _GEMINI_DAILY_QUOTA_DEAD = True
+                        log("   🚨 Gemini 일일 quota 완전 소진 감지 → 이후 호출 모두 Groq로 직행")
+                    # 이 호출도 즉시 폴백
+                    if label != "vision":
+                        return _call_groq(contents, label=label)
+                    return None
                 retryable = any(
                     c in err_str for c in [
                         "503", "UNAVAILABLE", "429", "500", "502", "504",
@@ -265,10 +305,8 @@ def gemini_generate(contents, label="", prefer_lite=False):
                     log(f"   ⏳ Gemini[{model}] {label} 재시도 "
                         f"({attempt + 1}/{retries}, {wait}s): {err_str[:80]}")
                     time.sleep(wait)
-                # else: 다음 모델로
 
     # ━━ Gemini 전체 체인 실패 → Groq Llama 최후 폴백 ━━
-    # vision은 텍스트 모델이라 폴백 X. 다른 호출(classify/post/naver-rewrite 등)만 시도.
     if label != "vision":
         groq_result = _call_groq(contents, label=label)
         if groq_result is not None:
@@ -4911,14 +4949,14 @@ def run_bot():
                 wp_post_id = r.json().get("id")
                 log(f"🎉 [{kw}] 발행 완료 (id={wp_post_id})")
                 posted_count += 1
-                # within-run 중복 차단: 같은 회차 안에서 비슷한 키워드가 또 들어오면 스킵
+                # within-run 중복 차단
                 recent_titles.insert(0, title)
                 # 네이버 블로그용 윤색본 자동 생성·저장
                 try:
                     post_url = f"https://whyhot.kr/?p={wp_post_id}"
                     rewritten = rewrite_for_naver(
                         title, full_html, info["category"], kw,
-                        images=images,  # 외부 이미지 URL을 그대로 네이버 드래프트에 박기
+                        images=images,
                     )
                     if rewritten:
                         save_naver_draft(rewritten, kw, post_url)
