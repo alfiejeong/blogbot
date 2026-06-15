@@ -14,6 +14,46 @@ def log(msg):
     print(f"DEBUG: {msg}")
 
 
+# --- [공통: 외국 문자 정화] ---
+# 정두릅 결정 2026-06: 외국어 0자 정책 유지하되, Llama가 흔히 섞는 1~3자(韓·美·中·日 등)는
+# 자동 제거 후 통과시킴. 그 이상이면 모델이 본격적으로 외국어로 답변한 신호 → 거부.
+# 이전: 1자만 검출돼도 발행 거부 → 필 포든·라이즈 등 통과 가능 글 폐기
+FOREIGN_BLOCKS = [
+    ("hanja", 0x4E00, 0x9FFF),
+    ("kana", 0x3040, 0x30FF),
+    ("cyrillic", 0x0400, 0x04FF),
+    ("arabic", 0x0600, 0x06FF),
+    ("thai", 0x0E00, 0x0E7F),
+    ("devanagari", 0x0900, 0x097F),
+    ("hebrew", 0x0590, 0x05FF),
+    ("greek", 0x0370, 0x03FF),
+]
+
+
+def strip_foreign_chars(text):
+    """외국 문자 8개 블록을 제거. (sanitized, total_removed, detail_dict) 반환."""
+    if not text:
+        return text, 0, {}
+    counts = {name: 0 for name, _, _ in FOREIGN_BLOCKS}
+    out_chars = []
+    for ch in text:
+        cp = ord(ch)
+        matched = False
+        for name, lo, hi in FOREIGN_BLOCKS:
+            if lo <= cp <= hi:
+                counts[name] += 1
+                matched = True
+                break
+        if not matched:
+            out_chars.append(ch)
+    total = sum(counts.values())
+    detail = {k: v for k, v in counts.items() if v > 0}
+    return "".join(out_chars), total, detail
+
+
+FOREIGN_AUTO_SANITIZE_LIMIT = 3  # 3자 이하면 자동 제거 후 통과, 초과면 거부
+
+
 # --- [1. 설정] ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 WP_APP_PW = os.environ.get("WP_APP_PW")
@@ -125,6 +165,12 @@ def _call_groq(contents, label=""):
     last_err = None
     for model_name in GROQ_MODELS:
         try:
+            # 8B 모델은 context 작아서 (~6k 토큰) 본문 생성 시 413 위험 — prompt 절단
+            # 정두릅 결정 2026-06: 기아 카니발 글 8B 413 사고 → 8B 호출 시 prompt 3500자 제한
+            send_prompt = prompt
+            if "8b" in model_name and len(prompt) > 3500:
+                send_prompt = prompt[:3500] + "\n\n위 정보 바탕으로 자연스러운 한국어 글로 작성하라."
+                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 압축")
             log(f"   🆘 Groq[{model_name}] 시도 ({label})")
             r = requests.post(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -134,7 +180,7 @@ def _call_groq(contents, label=""):
                 },
                 json={
                     "model": model_name,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": [{"role": "user", "content": send_prompt}],
                     "temperature": 0.7,
                     "max_tokens": 4000,
                 },
@@ -554,12 +600,18 @@ def get_news_trending_keywords(candidate_pool, per_seed_top=2, min_count=2):
     """
     CATEGORY_SEEDS = [
         ("entertainment", "K팝 아이돌"),
-        ("entertainment", "드라마 출연"),
+        ("entertainment", "드라마 캐스팅"),
+        ("entertainment", "예능 출연"),
+        ("entertainment", "영화 개봉"),
         ("sports", "프로야구 KBO"),
         ("sports", "K리그 축구"),
+        ("sports", "손흥민 음바페 메시"),
         ("game", "신작 게임 출시"),
+        ("game", "리그오브레전드 LCK"),
         ("it", "AI 신제품"),
+        ("it", "갤럭시 아이폰"),
         ("auto", "신차 출시"),
+        ("auto", "전기차 SUV"),
     ]
 
     picks_log = []
@@ -711,11 +763,11 @@ def build_keyword_pool(d_df):
             + list(globals().get("KNOWN_SPORTS", []))
             + list(globals().get("KNOWN_ENTERTAINMENT", []))
         )
-        news_picks = get_news_trending_keywords(news_candidate_pool)
+        news_picks = get_news_trending_keywords(news_candidate_pool, per_seed_top=2)
         news_picks = [k for k in news_picks if k not in pool]
         if news_picks:
-            pool.extend(news_picks[:10])
-            log(f"   📰 뉴스 빈도 픽업 {len(news_picks[:10])}개 풀 추가")
+            pool.extend(news_picks[:15])
+            log(f"   📰 뉴스 빈도 픽업 {len(news_picks[:15])}개 풀 추가")
     except Exception as e:
         log(f"   뉴스 빈도 픽업 실패: {str(e)[:80]}")
 
@@ -3400,35 +3452,23 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         log(f"   ⚠️ H2 헤딩 {h2_count}개만 — 글 구조 미완, 스킵")
         return None, None
 
-    # ★ 외국어 0자 강제 — 한글·영문·숫자·구두점 외 모든 외국 문자 차단 ★
-    # (정두릅 결정 2026-06: 마인크래프트 글 러시아어 사고로 확장. 한자/가나/키릴/아랍/태국 등 0자)
+    # ★ 외국어 0자 정책 — 단, Llama가 흔히 섞는 1~3자(韓·美·中·日)는 자동 정화 후 통과 ★
+    # (정두릅 결정 2026-06: 1자 검출시 즉시 거부 → 발행 가능 글 폐기 사고. 임계값 도입)
+    # 4자 이상: 모델이 본격적으로 외국어 모드 → 거부 유지
+    # 1~3자: 자동 제거하고 진행 (제목·본문 둘 다)
     plain_for_lang = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content)
-    check_text = title + plain_for_lang
-    foreign_counts = {"hanja": 0, "kana": 0, "cyrillic": 0, "arabic": 0, "thai": 0,
-                      "devanagari": 0, "hebrew": 0, "greek": 0}
-    for ch in check_text:
-        cp = ord(ch)
-        if 0x4E00 <= cp <= 0x9FFF:
-            foreign_counts["hanja"] += 1
-        elif 0x3040 <= cp <= 0x30FF:
-            foreign_counts["kana"] += 1
-        elif 0x0400 <= cp <= 0x04FF:
-            foreign_counts["cyrillic"] += 1
-        elif 0x0600 <= cp <= 0x06FF:
-            foreign_counts["arabic"] += 1
-        elif 0x0E00 <= cp <= 0x0E7F:
-            foreign_counts["thai"] += 1
-        elif 0x0900 <= cp <= 0x097F:
-            foreign_counts["devanagari"] += 1
-        elif 0x0590 <= cp <= 0x05FF:
-            foreign_counts["hebrew"] += 1
-        elif 0x0370 <= cp <= 0x03FF:
-            foreign_counts["greek"] += 1
-    total_foreign = sum(foreign_counts.values())
-    if total_foreign > 0:
-        detail = ", ".join(f"{k}={v}" for k, v in foreign_counts.items() if v > 0)
-        log(f"   🚫 외국 문자 검출 ({detail}) — 발행 거부 (외국어 0자 정책)")
+    _, t_count, _ = strip_foreign_chars(title)
+    _, c_count, c_detail = strip_foreign_chars(plain_for_lang)
+    total_foreign = t_count + c_count
+    if total_foreign > FOREIGN_AUTO_SANITIZE_LIMIT:
+        detail = ", ".join(f"{k}={v}" for k, v in c_detail.items())
+        log(f"   🚫 외국 문자 {total_foreign}자 검출 ({detail}) — 발행 거부 (정책 초과)")
         return None, None
+    if total_foreign > 0:
+        # 1~3자 자동 정화: title과 HTML content 모두 한자 등 제거
+        title, _, _ = strip_foreign_chars(title)
+        content, _, _ = strip_foreign_chars(content)
+        log(f"   🧼 외국 문자 {total_foreign}자 자동 정화 후 진행")
 
     # ★ 사진 설명 사설 제거 ★
     # "○○의 사진", "○○의 드레스 사진", "사진 캡처", "사진 = ○○" 등의 사설 본문에서 제거.
@@ -4174,28 +4214,20 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
         if not body_n:
             raise ValueError("empty body from gemini")
 
-        # ★ 네이버 윤색본 외국어 절대 0자 강제 — 한자·가나·키릴·아랍·태국 등 모두 ★
-        # (정두릅 결정 2026-06: 마인크래프트 글 러시아어 사고로 확장)
+        # ★ 네이버 윤색본 외국어 정책 — 1~3자는 자동 정화, 4자 이상 거부 ★
+        # (정두릅 결정 2026-06: 아이유 윤색본 한자 2자로 폐기 사고 → 임계값 도입)
         check_text = title_n + body_n + " ".join(tags)
-        foreign_blocks = [
-            ("hanja", 0x4E00, 0x9FFF),       # 한자
-            ("kana", 0x3040, 0x30FF),         # 가나
-            ("cyrillic", 0x0400, 0x04FF),     # 러시아어
-            ("arabic", 0x0600, 0x06FF),       # 아랍어
-            ("thai", 0x0E00, 0x0E7F),         # 태국어
-            ("devanagari", 0x0900, 0x097F),   # 힌디
-            ("hebrew", 0x0590, 0x05FF),       # 히브리어
-            ("greek", 0x0370, 0x03FF),        # 그리스어
-        ]
-        detected = {}
-        for name, lo, hi in foreign_blocks:
-            c = sum(1 for ch in check_text if lo <= ord(ch) <= hi)
-            if c > 0:
-                detected[name] = c
-        if detected:
+        _, total_foreign, detected = strip_foreign_chars(check_text)
+        if total_foreign > FOREIGN_AUTO_SANITIZE_LIMIT:
             detail = ", ".join(f"{k}={v}" for k, v in detected.items())
-            log(f"   🚫 네이버 윤색본 외국 문자 검출 ({detail}) → 거부")
+            log(f"   🚫 네이버 윤색본 외국 문자 {total_foreign}자 ({detail}) → 거부 (정책 초과)")
             return None
+        if total_foreign > 0:
+            title_n, _, _ = strip_foreign_chars(title_n)
+            body_n, _, _ = strip_foreign_chars(body_n)
+            tags = [strip_foreign_chars(t)[0] for t in tags]
+            tags = [t for t in tags if t]
+            log(f"   🧼 네이버 윤색본 외국 문자 {total_foreign}자 자동 정화")
 
         return {
             "title": title_n,
@@ -4695,11 +4727,11 @@ def run_bot():
         log(f"⚠️ 주차 DB 로드 실패: {e}")
         d_df = None
 
-    # 최근 7일치 제목 1회만 캐싱 (토큰 단위 중복 차단용)
-    # 정두릅 결정 2026-06: 7일 차단으로 풀 고갈 → 3일로 단축
-    # 황인범·손흥민·아이폰 17 같은 핵심 키워드를 3일에 한 번씩 갱신 발행
-    recent_titles = get_recent_post_titles(days=3, limit=100)
-    log(f"🗂  최근 7일 제목 {len(recent_titles)}개 캐시 (중복 차단용)")
+    # 최근치 제목 캐싱 (토큰 단위 중복 차단용)
+    # 정두릅 결정 2026-06: 7일 → 3일 → 2일로 단축 (월드컵 매일 새 경기, 일별 갱신 발행 가능)
+    # 월드컵 5선수 + KBO + K리그 + 레이가 "최근 발행됨"으로 차단되던 패턴 해소 목표
+    recent_titles = get_recent_post_titles(days=2, limit=100)
+    log(f"🗂  최근 2일 제목 {len(recent_titles)}개 캐시 (중복 차단용)")
 
     keywords = build_keyword_pool(d_df)
     posted_count = 0
@@ -4876,11 +4908,10 @@ def run_bot():
                 tag_ids=tag_ids,
             )
             if r.status_code in (200, 201):
-                wp_post_id = r.json().get('id')
-                state = "draft 저장" if PUBLISH_AS_DRAFT else "발행 완료"
-                log(f"🎉 [{kw}] {state} (id={wp_post_id})")
+                wp_post_id = r.json().get("id")
+                log(f"🎉 [{kw}] 발행 완료 (id={wp_post_id})")
                 posted_count += 1
-                # within-run 중복 차단
+                # within-run 중복 차단: 같은 회차 안에서 비슷한 키워드가 또 들어오면 스킵
                 recent_titles.insert(0, title)
                 # 네이버 블로그용 윤색본 자동 생성·저장
                 try:
@@ -4899,13 +4930,10 @@ def run_bot():
         except Exception as e:
             log(f"🚨 [{kw}] 오류: {e}")
 
-        # 키워드 사이 sleep — Gemini·Groq 분당 호출 한도 분산
-        # (정두릅 결정 2026-05: 발행 2배로 늘리면서 윤색 quota 누적 → 누락 방지)
-        time.sleep(12)
+        time.sleep(8)
 
     log(f"\n✅ 실행 종료. 이번 회차 신규 발행: {posted_count}개")
 
 
 if __name__ == "__main__":
     run_bot()
-# end of file
