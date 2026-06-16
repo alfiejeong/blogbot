@@ -171,8 +171,12 @@ def _call_groq(contents, label=""):
         if "8b" in model_name:
             max_tok = 2000  # 출력도 절반으로
             if len(prompt) > 1800:
-                send_prompt = prompt[:1800] + "\n\n위 정보 바탕으로 한국어 800자 내외 글 작성."
-                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 / max_tok={max_tok}")
+                # 양끝 보존: 시작부 1100자(맥락) + 끝부 600자(JSON 스키마/포맷 지시)
+                # 정두릅 결정 2026-06: 단순 [:1800] 절단으로 JSON 스키마 잘려 응답 깨짐 사고
+                head = prompt[:1100]
+                tail = prompt[-600:]
+                send_prompt = head + "\n[...중간 생략...]\n" + tail
+                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 (양끝 보존) / max_tok={max_tok}")
         # 정두릅 결정 2026-06: 70B 429는 TPM 분당 초과 — 30초 대기 후 1회 재시도 (다음 모델로 안 넘김)
         retried_429 = False
         move_to_next_model = False
@@ -644,6 +648,10 @@ def get_news_trending_keywords(candidate_pool, per_seed_top=2, min_count=2):
         ("sports", "프로야구 KBO"),
         ("sports", "K리그 축구"),
         ("sports", "손흥민 음바페 메시"),
+        # 정두릅 결정 2026-06: 월드컵 외국팀·선수 보강 시드 3개
+        ("sports", "월드컵 잉글랜드 프랑스"),
+        ("sports", "월드컵 브라질 아르헨티나"),
+        ("sports", "월드컵 스페인 포르투갈"),
         ("game", "신작 게임 출시"),
         ("game", "리그오브레전드 LCK"),
         ("it", "AI 신제품"),
@@ -709,54 +717,94 @@ def build_keyword_pool(d_df):
     # 정두릅 결정 2026-06: 광범위 키워드("FIFA 월드컵")는 7일 한 번 발행 후 차단 → 효율 ↓
     # 선수·국가 위주로 정밀화. 매일 다른 인물·매치로 7일 회전 풍부하게.
     WORLDCUP_PRIORITY = [
-        # 한국 핵심 선수 (슈퍼스타 위주, 동명이인 차단 완화로 다 통과 가능)
+        # 한국 핵심 선수
         "손흥민", "이강인", "김민재", "황희찬", "조규성", "황인범",
         "이재성", "조현우", "정우영", "백승호", "오현규", "엄지성",
+        "정상빈", "엄원상", "박용우", "권창훈", "송민규",
         # 해외 슈퍼스타
         "리오넬 메시", "킬리안 음바페", "크리스티아누 호날두", "엘링 홀란",
-        "주드 벨링엄", "비니시우스 주니어", "라민 야말", "쥐드 벨링엄",
+        "주드 벨링엄", "비니시우스 주니어", "라민 야말",
         "주앙 펠릭스", "라파엘 레앙", "페드리", "가비",
-        # 강팀
+        "케일러 나바스", "라우타로 마르티네스", "줄리안 알바레스",
+        "필 포든", "부카요 사카", "콜 팔머", "디오고 조타",
+        "케빈 더 브라위너",
+        # 정두릅 결정 2026-06: 한국 외 강팀 선수 대폭 확장
+        # 잉글랜드
+        "해리 케인", "주드 벨링엄", "데클란 라이스", "해리 매과이어",
+        # 포르투갈
+        "베르나르두 실바", "후벵 디아스", "페페", "조앙 칸셀루", "뉘노 멘데스",
+        # 스페인
+        "로드리", "다니 올모", "페란 토레스", "알바로 모라타", "아이메릭 라포르트",
+        # 프랑스
+        "앙투안 그리즈만", "올리비에 지루", "라파엘 바란", "오렐리앙 추아메니",
+        # 브라질
+        "네이마르", "히샬리송", "안토니", "에데르 밀리탕", "마르키뉴스",
+        # 아르헨티나
+        "앙헬 디 마리아", "에밀리아노 마르티네스", "니콜라스 오타멘디", "엔조 페르난데스",
+        # 독일
+        "토니 크로스", "토마스 뮐러", "마누엘 노이어", "위르겐 클롭",
+        "프로릭", "카이 하베르츠", "안토니오 뤼디거",
+        # 네덜란드
+        "버질 반다이크", "프랭키 더 용", "코디 학포",
+        # 벨기에
+        "로멜루 루카쿠", "케빈 더 브라위너", "예레미 도쿠",
+        # 이탈리아·크로아티아·우루과이
+        "루카 모드리치", "마테오 코바치치", "다르코 페리시치",
+        "페데리코 발베르데", "다르윈 누녜스",
+        # 강팀 — 국가명 (단독·"대표팀" 모두)
         "브라질 대표팀", "아르헨티나 대표팀", "프랑스 대표팀", "독일 대표팀",
         "스페인 대표팀", "잉글랜드 대표팀", "포르투갈 대표팀", "일본 대표팀",
         "네덜란드 대표팀", "벨기에 대표팀", "이탈리아 대표팀", "우루과이 대표팀",
-        # 정두릅 결정 2026-06: 광범위 키워드("북중미 월드컵")는 1회 발행 후 3일간 풀 한 자리 차지 → 제거
-        # 한국 추가 선수 (시즌 진행 중 화제 인물)
-        "정상빈", "엄원상", "박용우", "권창훈", "송민규",
-        # 해외 추가 슈퍼스타
-        "케일러 나바스", "라우타로 마르티네스", "줄리안 알바레스",
-        "필 포든", "부카요 사카", "콜 팔머", "디오고 조타",
-        "케빈 더 브라위너", "케말 데미랄", "다비드 하벨란",
+        "크로아티아 대표팀", "모로코 대표팀", "멕시코 대표팀", "콜롬비아 대표팀",
+        "사우디아라비아 대표팀", "이란 대표팀", "호주 대표팀",
+        # 감독·코치 (이슈성 큰 인물)
+        "주제 무리뉴", "디에고 시메오네", "위르겐 클롭",
+        # 경기/대결 (현재 화제 매치업)
+        "스페인 vs 프랑스", "잉글랜드 vs 독일", "브라질 vs 아르헨티나",
     ]
     # 매 사이클 픽업 — 뉴스 빈도 기반 우선 + 셔플 보완
     # (정두릅 결정 2026-06: 손흥민·황인범 등 골 넣은 선수가 자동 우선 픽업되도록)
     wc_candidates = [k for k in WORLDCUP_PRIORITY if k not in pool]
 
-    # 월드컵 관련 최신 뉴스 가져와서 빈도 분석
+    # 정두릅 결정 2026-06: 월드컵 뉴스 빈도 분석 — 다중 시드 쿼리
+    # 직전 사고: "월드컵" 단일 검색이 한국 보도에 치우쳐 외국팀·선수 다 묻힘
+    # → 경기/골/결과/대결 등 5가지 시드로 보도 풀 다각화
+    WC_SEEDS = [
+        "월드컵",
+        "월드컵 경기 결과",
+        "월드컵 골 득점",
+        "월드컵 조별리그",
+        "월드컵 승부",
+        "월드컵 명승부",
+    ]
     hot_picks = []
     try:
-        news_items = fetch_naver_news_items("월드컵", display=20) or []
-        blob = " ".join(
-            (it.get("title", "") + " " + it.get("desc", ""))
-            for it in news_items
-        )
-        # 각 후보가 뉴스에 몇 번 등장하는지 카운트
-        scored = []
-        for k in wc_candidates:
-            count = blob.count(k)
-            if count > 0:
-                scored.append((k, count))
-        scored.sort(key=lambda x: -x[1])
-        hot_picks = [k for k, c in scored[:3]]  # 빈도 상위 3개
-        if hot_picks:
-            log(f"   🔥 월드컵 뉴스 빈도 상위: {[(k, dict(scored)[k]) for k in hot_picks]}")
+        combined_blob = ""
+        for seed in WC_SEEDS:
+            try:
+                items = fetch_naver_news_items(seed, display=15) or []
+                for it in items:
+                    combined_blob += " " + it.get("title", "") + " " + it.get("desc", "")
+            except Exception:
+                pass
+        if combined_blob:
+            scored = []
+            for k in wc_candidates:
+                count = combined_blob.count(k)
+                if count > 0:
+                    scored.append((k, count))
+            scored.sort(key=lambda x: -x[1])
+            # 정두릅 결정 2026-06: 상위 3 → 상위 6개로 (외국팀 더 많이 잡힘)
+            hot_picks = [k for k, c in scored[:6]]
+            if hot_picks:
+                log(f"   🔥 월드컵 뉴스 빈도 상위 (다중 시드): {[(k, dict(scored)[k]) for k in hot_picks]}")
     except Exception as e:
         log(f"   월드컵 뉴스 빈도 분석 실패: {str(e)[:60]}")
 
-    # 빈도 상위 3개 + 셔플 2개 (시즌 풍부함 유지)
+    # 정두릅 결정 2026-06: 빈도 상위 6개 + 셔플 3개 = 9개 (이전 5개 → 9개)
     remaining = [k for k in wc_candidates if k not in hot_picks]
     random.shuffle(remaining)
-    wc_boost = hot_picks + remaining[:max(0, 5 - len(hot_picks))]
+    wc_boost = hot_picks + remaining[:max(0, 9 - len(hot_picks))]
     pool.extend(wc_boost)
     if wc_boost:
         log(f"   ⚽ 월드컵 강제 픽업 {len(wc_boost)}개: {wc_boost}")
@@ -1056,6 +1104,14 @@ def detect_homonym_keyword(kw, news_items):
         log(f"   ✓ 동명이인 OFF: {top_field} 압도적 ({top_count}/{total}) — 단일 인물 판정")
         return False
 
+    # 정두릅 결정 2026-06: 60% 안 닿아도 2위의 1.5배 이상이면 단일 인물 판정
+    # 손흥민(스포츠 10:기업 6 = 1.67배), 이강인(11:5 = 2.2배) 통과 목표
+    if len(sorted_fields) >= 2:
+        second_count = sorted_fields[1][1]
+        if second_count > 0 and top_count / second_count >= 1.5:
+            log(f"   ✓ 동명이인 OFF: {top_field} 우세 ({top_count} vs {second_count}, {top_count/second_count:.1f}배) — 단일 인물 판정")
+            return False
+
     # 그 외 2분야 이상 비등이면 동명이인 모호
     if len(field_counts) >= 2:
         log(f"   ⚠️ 동명이인 감지 ({len(field_counts)}개 분야: {field_counts})")
@@ -1085,6 +1141,16 @@ KNOWN_SPORTS = [
     "토트넘", "바르셀로나", "레알 마드리드", "맨체스터", "맨유", "맨시티",
     "아스널", "리버풀", "첼시", "PSG", "유벤투스", "바이에른", "도르트문트",
     "EPL", "라리가", "분데스리가", "챔피언스리그", "UCL", "K리그",
+    # 정두릅 결정 2026-06: 월드컵 시즌 — 외국팀 선수 휴리스틱 강제 sports
+    "해리 케인", "베르나르두 실바", "후벵 디아스", "페페",
+    "로드리", "다니 올모", "페란 토레스", "알바로 모라타",
+    "앙투안 그리즈만", "올리비에 지루", "오렐리앙 추아메니",
+    "네이마르", "히샬리송", "안토니", "에데르 밀리탕",
+    "앙헬 디 마리아", "엔조 페르난데스", "에밀리아노 마르티네스",
+    "토니 크로스", "토마스 뮐러", "마누엘 노이어", "카이 하베르츠",
+    "버질 반다이크", "프랭키 더 용", "코디 학포",
+    "로멜루 루카쿠", "예레미 도쿠",
+    "루카 모드리치", "마테오 코바치치", "다르윈 누녜스",
     # 월드컵 시즌 — 해외 슈퍼스타 추가
     "리오넬 메시", "킬리안 음바페", "크리스티아누 호날두", "엘링 홀란",
     "주드 벨링엄", "비니시우스 주니어", "라민 야말", "주앙 펠릭스",
@@ -1260,6 +1326,16 @@ PLACE_HINTS = [
     "맛집", "카페", "디저트", "파스타", "초밥", "라멘", "베이커리",
     "핫플", "팝업", "성수", "강남", "잠실", "홍대", "압구정", "이태원",
     "역", "동", "구", "거리", "타운", "백화점", "쇼핑몰", "공원", "야구장",
+    # 정두릅 결정 2026-06: 부천아트센터 발행 사고 — 시설/공공기관/문화공간 모두 차단
+    "아트센터", "컨벤션센터", "문화센터", "체육센터", "스포츠센터",
+    "예술의전당", "콘서트홀", "공연장", "극장", "오페라하우스",
+    "박물관", "미술관", "갤러리", "전시관", "도서관", "기념관",
+    "공항", "터미널", "항구", "부두", "선착장",
+    "스타디움", "경기장", "체육관", "구장", "구장",
+    "시청", "도청", "구청", "군청", "시민회관", "문화의집",
+    "리조트", "호텔", "콘도", "펜션", "캠핑장",
+    "공원", "유원지", "동물원", "수족관", "테마파크",
+    "한옥마을", "민속촌", "유적지", "사찰", "성당",
 ]
 
 # hotspot/restaurant 통과 조건: 키워드에 명시적 지역 신호가 있어야 함
@@ -2759,8 +2835,16 @@ def filter_images_by_vision(pool, kw, category):
         score = verify_image_with_vision(url, kw, category)
         credit_short = (img.get("credit", "") or "")[:40]
         if score is None:
-            # 약한 출처가 Vision 실패면 거부 (무관 이미지 위험)
-            log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
+            # 정두릅 결정 2026-06: Vision quota 소진 시 sports/auto/it/game 카테고리는
+            # wikipedia/wikimedia 신뢰 (인물이 아닌 팀/제품/리그 → 무관 사진 위험 낮음)
+            # entertainment는 인물 매칭 정확도가 핵심이라 거부 유지
+            is_wiki = "wiki" in source.lower()
+            visually_safe_cat = category in ("sports", "auto", "it", "game")
+            if is_wiki and visually_safe_cat:
+                accepted.append(img)
+                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}): {credit_short}")
+            else:
+                log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
         elif score >= threshold:
             accepted.append(img)
             log(f"   ✓ Vision OK ({score}/10): {credit_short}")
@@ -4808,7 +4892,15 @@ def run_bot():
 
             # ③-B 뉴스 맥락이 사건사고/금융 분쟁이면 SKIP
             # (키워드는 인물/장소이지만 뉴스 맥락이 위험한 경우 차단)
-            if is_nonfit_news_context(news_ctx):
+            # 정두릅 결정 2026-06: 슈퍼스타·검증 키워드는 화이트리스트로 면제
+            # (손흥민·KBO·메시·라이즈 등 카테고리 단정 키워드는 사건사고 단어 우연 매칭으로 차단되던 사고)
+            NONFIT_WHITELIST = set(
+                list(globals().get("KNOWN_SPORTS", [])) +
+                list(globals().get("KNOWN_ENTERTAINMENT", []))
+            )
+            if kw in NONFIT_WHITELIST:
+                pass  # 슈퍼스타·검증 키워드는 사건사고 검사 면제
+            elif is_nonfit_news_context(news_ctx):
                 log("   ⏭️  뉴스 맥락이 사건사고/금융 분쟁 → 안전상 스킵")
                 continue
 
