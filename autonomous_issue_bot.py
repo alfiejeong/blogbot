@@ -54,6 +54,79 @@ def strip_foreign_chars(text):
 FOREIGN_AUTO_SANITIZE_LIMIT = 3  # 3자 이하면 자동 제거 후 통과, 초과면 거부
 
 
+# 정두릅 결정 2026-06: 제목 양옆 따옴표 자동 제거 + 동일 템플릿 중복 차단
+# 사고: 메시·네이마르 글이 같은 "○○, 요즘 안 풀리는 이유" 패턴으로 발행됨
+TITLE_QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\uff02\uff07\u00ab\u00bb`"
+
+
+def sanitize_title(title):
+    """제목 양옆 따옴표·특수기호 자동 제거. 내부 따옴표는 보존."""
+    if not title:
+        return title
+    t = title.strip()
+    # 반복적으로 양끝 따옴표 제거 ("'좋은 글'" 같은 중첩 케이스 처리)
+    for _ in range(5):
+        prev = t
+        t = t.strip().strip(TITLE_QUOTE_CHARS).strip()
+        if t == prev:
+            break
+    # 끝에 콤마/세미콜론도 정리
+    t = t.rstrip(",;:·- ")
+    return t
+
+
+def _title_tail_pattern(title, kw=None):
+    """제목에서 키워드(+조사) 제거하고 나머지 텍스트 추출.
+    '리오넬 메시, 요즘 안 풀리는 이유' (kw='리오넬 메시') → '요즘 안 풀리는 이유'
+    '네이마르 요즘 안 풀리는 이유' (kw='네이마르') → '요즘 안 풀리는 이유'
+    → 같은 템플릿 사용 감지."""
+    import re as _re
+    if not title:
+        return ""
+    t = title.strip()
+    if kw:
+        # 키워드 + 한국어 조사(이/가/는/은/을/를/에/도/의/만/와/과/, 등) 통째로 제거
+        pattern = _re.escape(kw) + r"[은는이가을를와과의도에에서로으로,，\s]*"
+        t = _re.sub(pattern, "", t, count=1)
+    # 공백·구두점만 남았으면 빈 문자열
+    cleaned = _re.sub(r"[\s.,!?·]+", "", t)
+    if not cleaned:
+        return ""
+    return t.strip()
+
+
+def is_title_pattern_duplicate(title, kw, recent_titles, recent_keywords=None, max_check=15):
+    """최근 발행 제목 중 같은 템플릿(키워드 제거 후 텍스트 일치)이 있으면 True.
+    recent_keywords: recent_titles와 같은 순서의 키워드 리스트 (없으면 단어 기반 추정)."""
+    if not title or not recent_titles:
+        return False
+    tail = _title_tail_pattern(title, kw)
+    if len(tail) < 5:
+        return False
+    for idx, rt in enumerate(recent_titles[:max_check]):
+        rt_kw = None
+        if recent_keywords and idx < len(recent_keywords):
+            rt_kw = recent_keywords[idx]
+        rt_tail = _title_tail_pattern(rt, rt_kw)
+        if not rt_tail:
+            # 키워드 모를 때 fallback: 양 끝 단어 제거 후 비교
+            rt_tail = _title_tail_pattern(rt)
+        # 정규화 후 일치 비교
+        import re as _re
+        norm_a = _re.sub(r"\s+", " ", tail).strip()
+        norm_b = _re.sub(r"\s+", " ", rt_tail).strip()
+        if norm_a and norm_a == norm_b:
+            return True
+        # 부분 일치(접미 70% 이상)도 중복으로 간주
+        if len(norm_a) >= 8 and len(norm_b) >= 8:
+            short = min(norm_a, norm_b, key=len)
+            long_ = max(norm_a, norm_b, key=len)
+            if short in long_ and len(short) / len(long_) >= 0.7:
+                return True
+    return False
+
+
+
 # --- [1. 설정] ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 WP_APP_PW = os.environ.get("WP_APP_PW")
@@ -3299,10 +3372,11 @@ def generate_post(kw, info, news_ctx=""):
 - H2 4개 + 각 H2 직후 [IMG] 한 줄 + 본문 한두 문장 구조 유지.
 
 [제목 스타일]
-반드시 **"{style_label}"** 으로 작성. 예시 톤: {style_example}
-- 베끼지 말고 톤만 가져와서 새로.
+**"{style_label}"** 톤으로 작성. 예시: {style_example}
+- 예시를 그대로 베끼지 말고 톤만 가져와서 키워드 맥락에 맞게 완전히 새로.
 - "정리해 봤어요", "한 번에 정리" 같은 흔한 표현 금지.
 - 제목에 "주차" 단어 금지.
+- **제목을 따옴표(" ' ` 「」 『』)로 감싸지 말 것. 따옴표 없는 평문 문장으로만 출력.**
 
 [출력 형식 - 오직 JSON만]
 {{
@@ -3352,11 +3426,12 @@ def generate_post(kw, info, news_ctx=""):
 - H2 4개 + 각 H2 직후 [IMG] 한 줄 + 본문 한두 문장 구조 유지.
 
 [제목 스타일]
-반드시 **"{style_label}"** 으로 작성. 예시 톤: {style_example}
-- 베끼지 말고 톤만 가져와 새로.
+**"{style_label}"** 톤으로 작성. 예시: {style_example}
+- 예시를 그대로 베끼지 말고 톤만 가져와서 키워드 맥락에 맞게 완전히 새로.
 - "정리해 봤어요", "이래서 핫" 같은 흔한 표현 금지.
 - 제목에 "주차" 단어 금지.
 - **평가어("정의로운/옳은/잘못된/당연한") 제목에 절대 금지.**
+- **제목을 따옴표(" ' ` 「」 『』)로 감싸지 말 것. 따옴표 없는 평문 문장으로만 출력.**
 
 [출력 형식 - 오직 JSON만]
 {{
@@ -3424,10 +3499,11 @@ H2 헤딩 4개. 각 H2 직후에 정확히 [IMG] 한 줄.
 (반복)
 
 [제목 - 매번 달라야 함]
-이번 글의 제목 스타일은 반드시 **"{style_label}"** 으로 작성.
+이번 글의 제목 스타일은 **"{style_label}"** 톤으로 작성.
 참고 예시 형식: {style_example}
-- 예시 문구를 그대로 베끼지 말고 그 톤만 가져와서 새로 만들기.
+- 예시 문구를 그대로 베끼지 말고 그 톤만 가져와서 키워드 맥락에 맞게 완전히 새로.
 - "정리해 봤어요", "한 번에 정리", "이래서 핫" 같은 흔한 표현 금지.
+- **제목을 따옴표(" ' ` 「」 『』)로 감싸지 말 것. 따옴표 없는 평문 문장으로만 출력.**
 
 [출력 형식 - 오직 JSON만]
 {{
@@ -3496,11 +3572,12 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 한두 문장.
 
 [제목 - 매번 달라야 함]
-이번 글의 제목 스타일은 반드시 **"{style_label}"** 으로 작성.
+이번 글의 제목 스타일은 **"{style_label}"** 톤으로 작성.
 참고 예시 형식: {style_example}
-- 예시 문구를 그대로 베끼지 말고 그 톤만 가져와서 새로 만들기.
+- 예시 문구를 그대로 베끼지 말고 그 톤만 가져와서 키워드 맥락에 맞게 완전히 새로.
 - "정리해 봤어요", "한 번에 정리", "이래서 핫" 같은 흔한 표현 금지.
 - 제목에 "주차" 단어 절대 금지.
+- **제목을 따옴표(" ' ` 「」 『』)로 감싸지 말 것. 따옴표 없는 평문 문장으로만 출력.**
 
 [출력 형식 - 오직 JSON만]
 {{
@@ -3541,7 +3618,7 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
                     flags=re.DOTALL,
                 )
                 data = json.loads(escaped, strict=False)
-        title = (data.get("title") or "").strip()
+        title = sanitize_title(data.get("title") or "")
         content = (data.get("content_html") or "").strip()
         if not title or not content:
             raise ValueError("title/content 비어있음")
@@ -4329,7 +4406,7 @@ def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
                     flags=re.DOTALL,
                 )
                 data = json.loads(escaped, strict=False)
-        title_n = (data.get("title") or orig_title)[:40]
+        title_n = sanitize_title(data.get("title") or orig_title)[:40]
         body_n = (data.get("body") or "").strip()
         tags = data.get("tags") or []
         tags = [str(t).strip().lstrip("#") for t in tags if t][:10]
@@ -5031,6 +5108,20 @@ def run_bot():
             tag_ids = resolve_tag_ids(auto_tags) if auto_tags else None
             log(f"   🏷  WP 카테고리: {info['category']} → id={cat_id}")
             log(f"   🏷  WP 태그: {auto_tags} → {len(tag_ids or [])}개 매핑")
+
+            # 정두릅 결정 2026-06: 제목 형식 중복 차단 (메시·네이마르 같은 템플릿 중복 사고)
+            if is_title_pattern_duplicate(title, kw, recent_titles):
+                log(f"   🚫 제목 형식이 최근 발행과 동일 패턴 → 재포맷")
+                # 변형: 키워드 + 화제 톤
+                import random as _rnd
+                _alt_suffixes = [
+                    "이번 이슈 한 줄 정리", "지금 분위기가 다르다",
+                    "관심 폭발한 이유", "어제 그 장면",
+                    "팬들이 주목한 포인트", "지금 화제의 한 컷",
+                ]
+                title = f"{kw}, {_rnd.choice(_alt_suffixes)}"
+                log(f"   🔁 제목 재포맷: {title}")
+
             r = post_to_wordpress(
                 title, full_html,
                 featured_id=featured_id,
