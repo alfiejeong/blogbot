@@ -4314,6 +4314,67 @@ CATEGORY_KR_MAP = {
 }
 
 
+
+def build_naver_fallback_draft(orig_title, content_html, category, kw, images=None):
+    """
+    네이버 윤색이 실패했을 때 호출 — WP 원본을 살짝 정리해서 수동 편집용 초안 생성.
+    정두릅 결정 2026-06: 메시·네이마르 같은 글이 윤색 실패로 네이버 드래프트 누락되던 사고 해결.
+    원본 그대로 자동 발행은 아니라 사용자가 수동으로 다듬어 올릴 용도.
+    """
+    cat_kr = CATEGORY_KR_MAP.get(category, "오늘의 이슈")
+
+    # HTML 태그 제거 + 이미지/사진 사설 정리
+    plain = content_html or ""
+    plain = re.sub(r"<figure[^>]*>.*?</figure>", "", plain, flags=re.DOTALL | re.IGNORECASE)
+    plain = re.sub(r"<img[^>]*>", "", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"<h\d[^>]*>(.*?)</h\d>", r"\n\n[\1]\n", plain, flags=re.DOTALL | re.IGNORECASE)
+    plain = re.sub(r"<br\s*/?>", "\n", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"</?p[^>]*>", "\n", plain, flags=re.IGNORECASE)
+    plain = re.sub(r"<[^>]+>", "", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
+
+    # 외국 문자 자동 정화 (4자 이상이면 거부)
+    _, total_foreign, detected = strip_foreign_chars(plain)
+    if total_foreign > FOREIGN_AUTO_SANITIZE_LIMIT:
+        log(f"   🚫 원본 폴백도 외국 문자 {total_foreign}자 → 드래프트 생성 불가")
+        return None
+    if total_foreign > 0:
+        plain, _, _ = strip_foreign_chars(plain)
+
+    # 본문 너무 짧으면 의미 없음
+    if len(plain) < 100:
+        return None
+
+    # 본문 첫 ~1200자만 사용 (네이버 글쓰기 기본 길이)
+    body = plain[:1200].strip()
+    body = (
+        "[자동 윤색 실패 — 원본 정리본입니다. 네이버에 올리기 전 직접 다듬어주세요]\n\n"
+        + body
+        + "\n\n📍 자세한 글: https://whyhot.kr"
+    )
+
+    # 태그 — 카테고리 기본 + 키워드
+    tags = ["오늘의이슈", "트렌드", "화제", "실시간이슈", "와이핫", kw]
+
+    img_urls = []
+    if images:
+        for im in images:
+            u = im.get("url")
+            if u and u not in img_urls:
+                img_urls.append(u)
+
+    title_n = sanitize_title(orig_title)[:40]
+
+    return {
+        "title": title_n,
+        "body": body,
+        "tags": tags,
+        "category": cat_kr,
+        "image_urls": img_urls,
+        "is_fallback": True,  # 마커
+    }
+
+
 def rewrite_for_naver(orig_title, content_html, category, kw, images=None):
     """
     워드프레스 글을 네이버 블로그용으로 윤색.
@@ -5143,6 +5204,17 @@ def run_bot():
                     )
                     if rewritten:
                         save_naver_draft(rewritten, kw, post_url)
+                    else:
+                        # 정두릅 결정 2026-06: 윤색 실패 시 원본 정리본을 수동 편집용으로 저장
+                        # (네이버 드래프트 자체가 비어있어 사용자가 손도 못 대던 사고 해결)
+                        fallback = build_naver_fallback_draft(
+                            title, full_html, info["category"], kw, images=images,
+                        )
+                        if fallback:
+                            log(f"   📝 네이버 폴백 드래프트 생성 (윤색 실패 → 원본 정리본)")
+                            save_naver_draft(fallback, kw, post_url)
+                        else:
+                            log(f"   ⚠️ 네이버 드래프트 생성 불가 (윤색 실패 + 원본 폴백도 거부)")
                 except Exception as e:
                     log(f"   네이버 드래프트 생성 예외: {str(e)[:80]}")
             else:
