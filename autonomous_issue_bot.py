@@ -126,6 +126,72 @@ def is_title_pattern_duplicate(title, kw, recent_titles, recent_keywords=None, m
     return False
 
 
+# 정두릅 결정 2026-06: 단일 키워드 집중 원칙 절대 강화
+# 사고: "google usa" 글에 메타·유튜브 사회 미디어 중독 끼워넣기 → 저품질 사고
+# 본문 안에 키워드와 무관한 빅테크/브랜드 언급 다수면 발행 거부
+BIG_BRAND_ALIASES = {
+    "구글": ["구글", "Google", "google", "GOOGLE"],
+    "메타": ["메타", "Meta", "페이스북", "Facebook", "인스타그램", "Instagram"],
+    "유튜브": ["유튜브", "YouTube", "youtube"],
+    "애플": ["애플", "Apple", "아이폰", "iPhone", "맥북", "MacBook"],
+    "마이크로소프트": ["마이크로소프트", "Microsoft", "MS", "윈도우", "Windows"],
+    "아마존": ["아마존", "Amazon"],
+    "테슬라": ["테슬라", "Tesla"],
+    "삼성": ["삼성", "Samsung", "갤럭시", "Galaxy"],
+    "엔비디아": ["엔비디아", "NVIDIA", "Nvidia"],
+    "오픈AI": ["OpenAI", "오픈AI", "오픈에이아이", "챗GPT", "ChatGPT"],
+    "틱톡": ["틱톡", "TikTok"],
+    "디즈니": ["디즈니", "Disney"],
+    "네이버": ["네이버", "NAVER", "Naver"],
+    "카카오": ["카카오", "Kakao"],
+    "쿠팡": ["쿠팡", "Coupang"],
+}
+
+
+def detect_off_topic_brands(content_text, kw, threshold=2):
+    """본문 안에 키워드와 무관한 빅테크/브랜드가 N개 이상 언급되면 (True, 목록) 반환.
+    키워드가 자체 브랜드를 가리키는 경우(예: "구글 USA")는 그 브랜드 제외."""
+    if not content_text:
+        return False, []
+    plain = re.sub(r"<[^>]+>", "", content_text)
+    kw_low = (kw or "").lower()
+    off_topic = []
+    for brand_key, aliases in BIG_BRAND_ALIASES.items():
+        # 키워드가 이 브랜드 본인이면 무시
+        if any(a.lower() in kw_low for a in aliases):
+            continue
+        hits = sum(plain.count(a) for a in aliases)
+        if hits >= 2:  # 2번 이상 언급되면 본격 끼워넣기
+            off_topic.append(f"{brand_key}({hits}회)")
+    return (len(off_topic) >= threshold), off_topic
+
+
+def is_vague_english_keyword(kw):
+    """'google usa', 'apple korea', 'tesla 미국' 같이
+    영문 브랜드 + 국가/지역 모디파이어 = 알맹이 없는 글 생산.
+    True면 SKIP."""
+    if not kw:
+        return False
+    s = kw.strip().lower()
+    # 영문 단어 + 지역 모디파이어 패턴
+    location_modifiers = [
+        "usa", "us", "uk", "eu", "asia", "korea", "japan", "china",
+        "미국", "영국", "일본", "중국", "한국", "유럽",
+    ]
+    # "단어 + 지역" 2~3 토큰
+    parts = re.split(r"\s+", s)
+    if len(parts) == 2 and parts[1] in location_modifiers:
+        # 첫 토큰이 영문이고 알려진 브랜드/회사명 → vague
+        if re.match(r"^[a-z]+$", parts[0]) and len(parts[0]) >= 4:
+            return True
+    # "단어 미국 ~" 형태
+    if "미국" in s and len(s) <= 15 and any(re.match(r"^[a-z]", t) for t in parts):
+        return True
+    return False
+
+
+
+
 
 # --- [1. 설정] ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -2912,10 +2978,18 @@ def filter_images_by_vision(pool, kw, category):
             # wikipedia/wikimedia 신뢰 (인물이 아닌 팀/제품/리그 → 무관 사진 위험 낮음)
             # entertainment는 인물 매칭 정확도가 핵심이라 거부 유지
             is_wiki = "wiki" in source.lower()
-            visually_safe_cat = category in ("sports", "auto", "it", "game")
-            if is_wiki and visually_safe_cat:
+            # 정두릅 결정 2026-06: IT 제외 — "google usa" 글에 옛 건물·자전거 들어간 사고
+            # IT 키워드는 너무 일반적이라 wiki 매칭이 무관 이미지로 가는 사례 빈번
+            visually_safe_cat = category in ("sports", "auto", "game")
+            # 추가 안전장치: credit/caption에 키워드 토큰이 등장해야 wiki 신뢰
+            credit_full = (img.get("credit", "") or "") + " " + (img.get("caption", "") or "")
+            kw_tokens = [t for t in re.split(r"\s+", kw) if len(t) >= 2]
+            kw_in_credit = any(tok.lower() in credit_full.lower() for tok in kw_tokens)
+            if is_wiki and visually_safe_cat and kw_in_credit:
                 accepted.append(img)
-                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}): {credit_short}")
+                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}, 키워드 매칭): {credit_short}")
+            elif is_wiki and visually_safe_cat:
+                log(f"   ✗ Vision 실패 + wiki 출처 + 키워드 미매칭 → 거부: {credit_short}")
             else:
                 log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
         elif score >= threshold:
@@ -3366,6 +3440,15 @@ def generate_post(kw, info, news_ctx=""):
 4) 다음 경기/관전 포인트
    예시 톤: "📅 다음 경기는?", "👉 앞으로 관전 포인트", "🎯 이제 봐야 할 건"
 
+[단일 키워드 집중 — 절대 원칙]
+- 본문은 오직 "{kw}"에 관한 내용만 담아라.
+- "{kw}" 외 다른 회사·브랜드·인물·서비스 절대 언급 금지.
+  예: 키워드가 "구글"이면 메타·유튜브·애플·MS·아마존 등 빅테크 절대 언급 금지.
+  예: 키워드가 "손흥민"이면 메시·음바페·호날두 등 다른 선수 언급 금지.
+- 비교 분석("vs", "대비"), 산업 일반론, 시장 동향 일반화 모두 금지.
+- 뉴스 컨텍스트에 명시 등장한 다른 이름만 단 1회 짧게 인용 가능.
+- 알맹이 없는 일반론, 추상적 설명 금지. 키워드와 직접 연관된 구체적 사실만.
+
 [H2 작성 절대 원칙]
 - **H2 텍스트에 메타 설명 괄호 절대 금지**: "(한 줄 요약)", "(뉴스 인용)", "(스코어 인용)" 같은 가이드 괄호 출력 금지.
 - 위 예시는 톤 참고용. 매번 새로운 표현으로.
@@ -3419,6 +3502,15 @@ def generate_post(kw, info, news_ctx=""):
    예시 톤: "💬 댓글 반응이 진짜", "🗣 사람들은 어떻게 봤을까", "👥 반응이 극과 극"
 4) 앞으로 어떻게 될지
    예시 톤: "📅 다음은?", "👉 이제 어떻게", "🔮 앞으로가 더 궁금"
+
+[단일 키워드 집중 — 절대 원칙]
+- 본문은 오직 "{kw}"에 관한 내용만 담아라.
+- "{kw}" 외 다른 회사·브랜드·인물·서비스 절대 언급 금지.
+  예: 키워드가 "구글"이면 메타·유튜브·애플·MS·아마존 등 빅테크 절대 언급 금지.
+  예: 키워드가 "손흥민"이면 메시·음바페·호날두 등 다른 선수 언급 금지.
+- 비교 분석("vs", "대비"), 산업 일반론, 시장 동향 일반화 모두 금지.
+- 뉴스 컨텍스트에 명시 등장한 다른 이름만 단 1회 짧게 인용 가능.
+- 알맹이 없는 일반론, 추상적 설명 금지. 키워드와 직접 연관된 구체적 사실만.
 
 [H2 작성 절대 원칙]
 - **H2 텍스트에 메타 설명 괄호 절대 금지**: "(한 줄 요약)", "(뉴스 인용)", "(스코어 인용)", "(찬반)" 같은 가이드 괄호 출력 금지.
@@ -3668,6 +3760,13 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         title, _, _ = strip_foreign_chars(title)
         content, _, _ = strip_foreign_chars(content)
         log(f"   🧼 외국 문자 {total_foreign}자 자동 정화 후 진행")
+
+    # 정두릅 결정 2026-06: 본문 무관 브랜드 끼워넣기 차단 (google usa 글 사고 해결)
+    # 키워드와 무관한 빅테크/브랜드가 2개 이상 본문에 박혀 있으면 발행 거부
+    off_topic_hit, off_topic_list = detect_off_topic_brands(content, kw, threshold=2)
+    if off_topic_hit:
+        log(f"   🚫 본문에 무관 브랜드 끼워넣기 감지: {off_topic_list} — 발행 거부")
+        return None, None
 
     # ★ 사진 설명 사설 제거 ★
     # "○○의 사진", "○○의 드레스 사진", "사진 캡처", "사진 = ○○" 등의 사설 본문에서 제거.
@@ -5006,6 +5105,12 @@ def run_bot():
             # ⓪-A 부적합 토픽 차단 (코인/주식/매체명/정치/IT/날씨 등 - 분류 전 즉시 스킵)
             if is_nonfit_topic(kw):
                 log(f"   ⏭️  부적합 토픽 (코인/매체/정치/IT/날씨 등) → 스킵")
+                continue
+
+            # ⓪-A2 모호한 영문 브랜드+지역 키워드 차단 (정두릅 결정 2026-06)
+            # "google usa", "apple korea" 같이 알맹이 없는 글이 생산되던 사고 차단
+            if is_vague_english_keyword(kw):
+                log(f"   ⏭️  모호한 영문 브랜드+지역 키워드 → 알맹이 없음, 스킵: {kw}")
                 continue
 
             # ⓪-B 추상 키워드 차단 (자영업/절감/재테크 등 단독)
