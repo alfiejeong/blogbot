@@ -148,6 +148,30 @@ BIG_BRAND_ALIASES = {
 }
 
 
+
+
+def detect_truncated_body(content):
+    """본문이 단어 중간에 잘렸는지 감지. 리 유나이티드(리즈→리) 같은 사고 차단.
+    1) 본문 끝이 한글 자모(완성 안 된 글자)로 끝나면 잘림
+    2) 본문 마지막 문장이 종결 부호로 끝나지 않으면 잘림
+    """
+    if not content:
+        return False, "빈 본문"
+    plain = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content).strip()
+    if len(plain) < 50:
+        return False, ""
+    last = plain[-1] if plain else ""
+    if 0x1100 <= ord(last) <= 0x11FF or 0x3130 <= ord(last) <= 0x318F:
+        return True, f"본문이 한글 자모 '{last}'로 끝남 (단어 절단)"
+    # 마지막 문장이 종결 부호로 끝나야 함 (마지막 8자 안에 ., !, ?, 。)
+    last_tail = plain[-8:]
+    if not re.search(r"[.!?。．\u3002]", last_tail):
+        return True, f"본문 마지막 문장 종결 부호 없음 (잘림): ...{plain[-40:]!r}"
+    # 본문 마지막이 미완성 표현 (불완전 문장)으로 끝나는지
+    if plain.endswith(("리 유나이티드", "리 유나", "리 ", "리.")):
+        return True, "본문에 절단된 '리 유나이티드' 패턴 (리즈 사고 차단)"
+    return False, ""
+
 def detect_off_topic_brands(content_text, kw, threshold=2):
     """본문 안에 키워드와 무관한 빅테크/브랜드가 N개 이상 언급되면 (True, 목록) 반환.
     키워드가 자체 브랜드를 가리키는 경우(예: "구글 USA")는 그 브랜드 제외."""
@@ -308,10 +332,10 @@ def _call_groq(contents, label=""):
         send_prompt = prompt
         max_tok = 4000
         if "8b" in model_name:
-            max_tok = 2000  # 출력도 절반으로
+            # 정두릅 결정 2026-06: max_tok 2000 → 3000 (리 유나이티드 오타 사고)
+            # 8B 본문이 중간에 끊겨 단어 절단되던 사고 — 출력 여유 확보
+            max_tok = 3000
             if len(prompt) > 1800:
-                # 양끝 보존: 시작부 1100자(맥락) + 끝부 600자(JSON 스키마/포맷 지시)
-                # 정두릅 결정 2026-06: 단순 [:1800] 절단으로 JSON 스키마 잘려 응답 깨짐 사고
                 head = prompt[:1100]
                 tail = prompt[-600:]
                 send_prompt = head + "\n[...중간 생략...]\n" + tail
@@ -779,25 +803,61 @@ def get_news_trending_keywords(candidate_pool, per_seed_top=2, min_count=2):
     - 월드컵 빈도 분석과 동일 매커니즘 (이미 검증됨)
     비용: 호출당 ~7회 네이버 뉴스 API (1일 quota 25,000 중 ~170회 사용)
     """
-    CATEGORY_SEEDS = [
+    # 정두릅 결정 2026-06: 시드 30개 풀에서 매 사이클 랜덤 13개 선택
+    # 사고: 매 사이클 같은 시드 → 같은 키워드 → "최근 발행됨" 차단 패턴 반복
+    # 해결: 시드 다각화 + 셔플로 화이트리스트 외 신선 키워드 진입 확률 ↑
+    ALL_CATEGORY_SEEDS = [
+        # entertainment 8개
         ("entertainment", "K팝 아이돌"),
         ("entertainment", "드라마 캐스팅"),
         ("entertainment", "예능 출연"),
         ("entertainment", "영화 개봉"),
+        ("entertainment", "아이돌 컴백"),
+        ("entertainment", "OTT 신작 공개"),
+        ("entertainment", "배우 인터뷰 화제"),
+        ("entertainment", "예능 화제 장면"),
+        # sports 10개 (월드컵 시즌 우선)
         ("sports", "프로야구 KBO"),
         ("sports", "K리그 축구"),
-        ("sports", "손흥민 음바페 메시"),
-        # 정두릅 결정 2026-06: 월드컵 외국팀·선수 보강 시드 3개
         ("sports", "월드컵 잉글랜드 프랑스"),
         ("sports", "월드컵 브라질 아르헨티나"),
         ("sports", "월드컵 스페인 포르투갈"),
+        ("sports", "월드컵 일본 한국"),
+        ("sports", "프리미어리그 손흥민"),
+        ("sports", "라리가 레알 마드리드 바르셀로나"),
+        ("sports", "분데스리가 바이에른"),
+        ("sports", "프로농구 KBL"),
+        # game 5개
         ("game", "신작 게임 출시"),
         ("game", "리그오브레전드 LCK"),
+        ("game", "스팀 인디 게임"),
+        ("game", "닌텐도 신작"),
+        ("game", "발로란트 챔피언스"),
+        # it 5개
         ("it", "AI 신제품"),
         ("it", "갤럭시 아이폰"),
+        ("it", "오픈AI 챗GPT 신기능"),
+        ("it", "스타트업 투자"),
+        ("it", "전기차 자율주행"),
+        # auto 4개
         ("auto", "신차 출시"),
         ("auto", "전기차 SUV"),
+        ("auto", "현대 기아 신모델"),
+        ("auto", "테슬라 BYD 경쟁"),
     ]
+    # 매 사이클 13개 랜덤 선택 (카테고리별 최소 1개 보장)
+    by_cat = {}
+    for cat, seed in ALL_CATEGORY_SEEDS:
+        by_cat.setdefault(cat, []).append((cat, seed))
+    CATEGORY_SEEDS = []
+    # 각 카테고리에서 최소 1개 보장 (5개)
+    for cat in ("entertainment", "sports", "game", "it", "auto"):
+        if cat in by_cat:
+            CATEGORY_SEEDS.append(random.choice(by_cat[cat]))
+    # 나머지 8개는 전체에서 랜덤 (중복 제외)
+    remaining_pool = [s for s in ALL_CATEGORY_SEEDS if s not in CATEGORY_SEEDS]
+    random.shuffle(remaining_pool)
+    CATEGORY_SEEDS.extend(remaining_pool[:8])
 
     picks_log = []
     found = []
@@ -1239,23 +1299,55 @@ def detect_homonym_keyword(kw, news_items):
     total = sum(field_counts.values())
     sorted_fields = sorted(field_counts.items(), key=lambda x: -x[1])
     top_field, top_count = sorted_fields[0]
-    if total > 0 and top_count / total >= 0.6:
-        log(f"   ✓ 동명이인 OFF: {top_field} 압도적 ({top_count}/{total}) — 단일 인물 판정")
+    # 정두릅 결정 2026-06: 이서·리즈 사고 — 최소 신호 5건 미만은 무조건 모호
+    # "연예 2 vs 정치 1" 같은 3건 신호로 단일 인물 판정하다 사고 발생
+    if total < 5:
+        log(f"   ⚠️ 동명이인 신호 부족 ({total}건 < 5) → 모호, 차단")
+        return True
+
+    if top_count / total >= 0.8:
+        log(f"   ✓ 동명이인 OFF: {top_field} 절대 압도 ({top_count}/{total}, {int(top_count/total*100)}%) — 단일 인물 판정")
         return False
 
-    # 정두릅 결정 2026-06: 60% 안 닿아도 2위의 1.5배 이상이면 단일 인물 판정
-    # 손흥민(스포츠 10:기업 6 = 1.67배), 이강인(11:5 = 2.2배) 통과 목표
+    # 정두릅 결정 2026-06: 1.5배 → 5배로 강화 (이서/리즈 차단 목표)
+    # 손흥민(스포츠 10:기업 6 = 1.67배) 같이 비등하면 차단되지만, 신호 5건 이상이면 80% 룰로 통과 안 됨 → 차단 의도적
     if len(sorted_fields) >= 2:
         second_count = sorted_fields[1][1]
-        if second_count > 0 and top_count / second_count >= 1.5:
-            log(f"   ✓ 동명이인 OFF: {top_field} 우세 ({top_count} vs {second_count}, {top_count/second_count:.1f}배) — 단일 인물 판정")
+        if second_count > 0 and top_count / second_count >= 5.0:
+            log(f"   ✓ 동명이인 OFF: {top_field} 압도 ({top_count} vs {second_count}, {top_count/second_count:.1f}배) — 단일 인물 판정")
             return False
 
-    # 그 외 2분야 이상 비등이면 동명이인 모호
+    # 그 외는 모두 모호
     if len(field_counts) >= 2:
         log(f"   ⚠️ 동명이인 감지 ({len(field_counts)}개 분야: {field_counts})")
         return True
     return False
+
+
+
+
+def detect_mixed_news_topics(news_items, kw):
+    """뉴스 10건에 키워드 외 한국 인명·기관명·팀명·대학명이 5개 이상 등장하면
+    여러 토픽이 섞인 모호 키워드로 판정. 이서(유원대+이서이+베트남), 리즈(아이브+유나이티드+이한범) 사고 차단.
+    """
+    if not news_items or len(news_items) < 4:
+        return False, []
+    blob = " ".join((it.get("title", "") + " " + it.get("desc", "")) for it in news_items[:10])
+
+    # 한국 인명 후보 (2-4자 한글 + 조사) — 키워드 자체 제외
+    person_pattern = r"([가-힣]{2,4})(?:이|가|은|는|을|를|의|에|와|과|도|만|에서|에게|로|으로)"
+    persons = set(re.findall(person_pattern, blob))
+    persons.discard(kw)
+    persons = {p for p in persons if p != kw and len(p) >= 2}
+
+    # 기관·팀·대학 접미사
+    inst_pattern = r"[가-힣]{2,8}(?:대학교|대학|고등학교|구단|연맹|협회|위원회|연구소|병원|회사|기업|국가대표팀|유나이티드|왕조|왕가)"
+    institutions = set(re.findall(inst_pattern, blob))
+
+    distinct_entities = list(persons) + list(institutions)
+    if len(distinct_entities) >= 5:
+        return True, distinct_entities[:8]
+    return False, []
 
 
 def is_nonfit_news_context(news_ctx):
@@ -3737,6 +3829,12 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 250) — 빈약/잘림 의심, 스킵")
         return None, None
 
+    # 정두릅 결정 2026-06: 본문 단어 절단 감지 (리 유나이티드 오타 사고)
+    truncated, trunc_reason = detect_truncated_body(content)
+    if truncated:
+        log(f"   ⚠️ 본문 잘림 감지: {trunc_reason} — 발행 거부")
+        return None, None
+
     # H2가 충분히 안 들어왔으면(잘린 글) 스킵
     h2_count = len(re.findall(r"<h2", content, flags=re.IGNORECASE))
     if h2_count < 3:
@@ -3766,6 +3864,18 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     off_topic_hit, off_topic_list = detect_off_topic_brands(content, kw, threshold=2)
     if off_topic_hit:
         log(f"   🚫 본문에 무관 브랜드 끼워넣기 감지: {off_topic_list} — 발행 거부")
+        return None, None
+
+    # 정두릅 결정 2026-06: 본문에 키워드 외 한국 인명/기관 5개 이상 → 다중 토픽 혼합 글
+    # 이서 사고: 본문에 유원대·동허이서·이서이·총장 등 7+ 등장 → 마구잡이 콘텐츠
+    _plain_body = re.sub(r"<[^>]+>", "", content)
+    _person_pat = r"([가-힣]{2,4})(?:이|가|은|는|을|를|의|에|와|과|도|만)"
+    _persons = set(re.findall(_person_pat, _plain_body))
+    _persons = {p for p in _persons if p != kw and p not in kw}
+    _inst = set(re.findall(r"[가-힣]{2,8}(?:대학교|대학|구단|연맹|협회|위원회|유나이티드)", _plain_body))
+    _distinct = list(_persons)[:15] + list(_inst)[:5]
+    if len(_distinct) >= 5:
+        log(f"   🚫 본문에 키워드 외 한국 고유명사 {len(_distinct)}개 등장 (다중 토픽 혼합): {_distinct[:5]} — 거부")
         return None, None
 
     # ★ 사진 설명 사설 제거 ★
@@ -3811,10 +3921,14 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 
 
 # --- [8. 이미지 분배 (3중 폴백)] ---
-def render_figure(img):
+def render_figure(img, is_hero=False):
+    # 정두릅 결정 2026-06: hero img에 명시적 클래스·data 속성 박아 PHP 필터가 안정적으로 찾도록
+    extra_class = ' wp-post-image hero-fallback-source' if is_hero else ''
+    extra_attr = ' data-hero="1"' if is_hero else ''
     return (
-        f'<figure style="margin:40px 0 32px 0; padding:0;">'
+        f'<figure style="margin:40px 0 32px 0; padding:0;" class="hero-figure">'
         f'<img src="{img["url"]}" alt="{img["alt"]}" '
+        f'class="img-fallback{extra_class}"{extra_attr} '
         f'style="width:100%;border-radius:14px;display:block;margin:0;" loading="lazy">'
         f'<figcaption style="font-size:11px;color:#888;text-align:right;margin-top:10px;padding:0 4px;">'
         f'{img["credit"]}</figcaption>'
@@ -4180,7 +4294,8 @@ def build_intro(kw, hero_img, category):
     if THEME_AUTO_FEATURED_IMAGE:
         return "\n" + lead_p + "\n"
     else:
-        return f"\n{render_figure(hero_img)}\n{lead_p}\n"
+        # is_hero=True: 본문 최상단 hero figure에 명시 클래스 박아 PHP 필터가 우선 매칭
+        return f"\n{render_figure(hero_img, is_hero=True)}\n{lead_p}\n"
 
 
 # --- [9. 워드프레스 발행 ] ---
@@ -4440,8 +4555,8 @@ def build_naver_fallback_draft(orig_title, content_html, category, kw, images=No
     if total_foreign > 0:
         plain, _, _ = strip_foreign_chars(plain)
 
-    # 본문 너무 짧으면 의미 없음
-    if len(plain) < 100:
+    # 본문 너무 짧으면 의미 없음 (50자 이상으로 완화 — 짧아도 사용자 수동 편집 가능)
+    if len(plain) < 50:
         return None
 
     # 본문 첫 ~1200자만 사용 (네이버 글쓰기 기본 길이)
@@ -5152,6 +5267,13 @@ def run_bot():
                 log("   ⏭️  동명이인 모호 키워드 → AI 묶음 글 방지, 스킵")
                 continue
 
+            # ③-D 정두릅 결정 2026-06: 다중 토픽 모호 키워드 감지
+            # 이서(유원대+이서이+베트남) / 리즈(아이브+유나이티드+이한범) 사고 차단
+            mixed_hit, mixed_entities = detect_mixed_news_topics(news_items, kw)
+            if mixed_hit:
+                log(f"   ⏭️  뉴스에 다중 토픽 혼재 ({len(mixed_entities)}개 인물·기관): {mixed_entities[:5]} → 스킵")
+                continue
+
             # ②-B 분류가 SKIP이면 뉴스 본문으로 한 번 더 보정 시도
             if info["category"] not in ALLOWED_CATEGORIES:
                 cat_from_news = classify_by_news_context(news_items, kw)
@@ -5275,18 +5397,12 @@ def run_bot():
             log(f"   🏷  WP 카테고리: {info['category']} → id={cat_id}")
             log(f"   🏷  WP 태그: {auto_tags} → {len(tag_ids or [])}개 매핑")
 
-            # 정두릅 결정 2026-06: 제목 형식 중복 차단 (메시·네이마르 같은 템플릿 중복 사고)
+            # 정두릅 결정 2026-06: 패턴 중복이면 본문도 진부할 가능성 → 재포맷 대신 발행 스킵
+            # 이전: 제목만 다른 톤으로 바꿔서 발행 → 본문과 제목 미스매치로 "알맹이 빈 글" 사고
+            # ("포르투갈 대 콩고 민주 공화국 팬들이 주목한 포인트" 사례)
             if is_title_pattern_duplicate(title, kw, recent_titles):
-                log(f"   🚫 제목 형식이 최근 발행과 동일 패턴 → 재포맷")
-                # 변형: 키워드 + 화제 톤
-                import random as _rnd
-                _alt_suffixes = [
-                    "이번 이슈 한 줄 정리", "지금 분위기가 다르다",
-                    "관심 폭발한 이유", "어제 그 장면",
-                    "팬들이 주목한 포인트", "지금 화제의 한 컷",
-                ]
-                title = f"{kw}, {_rnd.choice(_alt_suffixes)}"
-                log(f"   🔁 제목 재포맷: {title}")
+                log(f"   🚫 제목 형식이 최근 발행과 동일 패턴 → 본문 진부 우려, 발행 스킵")
+                continue
 
             r = post_to_wordpress(
                 title, full_html,
@@ -5300,28 +5416,35 @@ def run_bot():
                 posted_count += 1
                 # within-run 중복 차단
                 recent_titles.insert(0, title)
-                # 네이버 블로그용 윤색본 자동 생성·저장
+                # 네이버 블로그용 윤색본 자동 생성·저장 (다단 폴백)
+                # 정두릅 결정 2026-06: 윤색·폴백·저장 각각 try/except 분리 — 한 단계 예외가 전체 차단 사고 해결
+                # 직전 사고: 홍석현·정연·포르투갈 글이 드래프트 누락
+                post_url = f"https://whyhot.kr/?p={wp_post_id}"
+                rewritten = None
                 try:
-                    post_url = f"https://whyhot.kr/?p={wp_post_id}"
                     rewritten = rewrite_for_naver(
-                        title, full_html, info["category"], kw,
-                        images=images,
+                        title, full_html, info["category"], kw, images=images,
                     )
-                    if rewritten:
-                        save_naver_draft(rewritten, kw, post_url)
-                    else:
-                        # 정두릅 결정 2026-06: 윤색 실패 시 원본 정리본을 수동 편집용으로 저장
-                        # (네이버 드래프트 자체가 비어있어 사용자가 손도 못 대던 사고 해결)
-                        fallback = build_naver_fallback_draft(
+                except Exception as re_e:
+                    log(f"   ⚠️ 네이버 윤색 예외: {str(re_e)[:80]}")
+
+                if not rewritten:
+                    try:
+                        rewritten = build_naver_fallback_draft(
                             title, full_html, info["category"], kw, images=images,
                         )
-                        if fallback:
+                        if rewritten:
                             log(f"   📝 네이버 폴백 드래프트 생성 (윤색 실패 → 원본 정리본)")
-                            save_naver_draft(fallback, kw, post_url)
-                        else:
-                            log(f"   ⚠️ 네이버 드래프트 생성 불가 (윤색 실패 + 원본 폴백도 거부)")
-                except Exception as e:
-                    log(f"   네이버 드래프트 생성 예외: {str(e)[:80]}")
+                    except Exception as fb_e:
+                        log(f"   ⚠️ 네이버 폴백 빌더 예외: {str(fb_e)[:80]}")
+
+                if rewritten:
+                    try:
+                        save_naver_draft(rewritten, kw, post_url)
+                    except Exception as sv_e:
+                        log(f"   ⚠️ 네이버 드래프트 저장 예외: {str(sv_e)[:80]}")
+                else:
+                    log(f"   ⚠️ 네이버 드래프트 생성 불가 (윤색·폴백 모두 실패)")
             else:
                 log(f"❌ [{kw}] 발행 실패 {r.status_code}: {r.text[:200]}")
 
