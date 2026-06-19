@@ -960,6 +960,12 @@ def build_keyword_pool(d_df):
         "주제 무리뉴", "디에고 시메오네", "위르겐 클롭",
         # 경기/대결 (현재 화제 매치업)
         "스페인 vs 프랑스", "잉글랜드 vs 독일", "브라질 vs 아르헨티나",
+        # 정두릅 결정 2026-06: 한국 매치업 추가 (실제 경기 결과 콘텐츠 누락 사고)
+        "한국 vs 멕시코", "한국 vs 일본", "한국 vs 브라질", "한국 vs 아르헨티나",
+        "한국 vs 우루과이", "한국 vs 포르투갈", "한국 vs 독일",
+        "한국 vs 스페인", "한국 vs 프랑스", "한국 vs 잉글랜드",
+        # 직전 경기 키워드 ('한국 멕시코', 띄어쓰기 단일 형태)
+        "한국 멕시코", "한국 일본", "한국 브라질", "한국 우루과이", "한국 포르투갈",
     ]
     # 매 사이클 픽업 — 뉴스 빈도 기반 우선 + 셔플 보완
     # (정두릅 결정 2026-06: 손흥민·황인범 등 골 넣은 선수가 자동 우선 픽업되도록)
@@ -1305,15 +1311,15 @@ def detect_homonym_keyword(kw, news_items):
         log(f"   ⚠️ 동명이인 신호 부족 ({total}건 < 5) → 모호, 차단")
         return True
 
-    if top_count / total >= 0.8:
-        log(f"   ✓ 동명이인 OFF: {top_field} 절대 압도 ({top_count}/{total}, {int(top_count/total*100)}%) — 단일 인물 판정")
+    # 정두릅 결정 2026-06: 80% → 70%, 5배 → 3배 완화
+    # 황인범(75%) 황희찬(69%) 등 명백한 스포츠 인물 차단되던 사고 해결
+    if top_count / total >= 0.7:
+        log(f"   ✓ 동명이인 OFF: {top_field} 우세 ({top_count}/{total}, {int(top_count/total*100)}%) — 단일 인물 판정")
         return False
 
-    # 정두릅 결정 2026-06: 1.5배 → 5배로 강화 (이서/리즈 차단 목표)
-    # 손흥민(스포츠 10:기업 6 = 1.67배) 같이 비등하면 차단되지만, 신호 5건 이상이면 80% 룰로 통과 안 됨 → 차단 의도적
     if len(sorted_fields) >= 2:
         second_count = sorted_fields[1][1]
-        if second_count > 0 and top_count / second_count >= 5.0:
+        if second_count > 0 and top_count / second_count >= 3.0:
             log(f"   ✓ 동명이인 OFF: {top_field} 압도 ({top_count} vs {second_count}, {top_count/second_count:.1f}배) — 단일 인물 판정")
             return False
 
@@ -1327,24 +1333,29 @@ def detect_homonym_keyword(kw, news_items):
 
 
 def detect_mixed_news_topics(news_items, kw):
-    """뉴스 10건에 키워드 외 한국 인명·기관명·팀명·대학명이 5개 이상 등장하면
-    여러 토픽이 섞인 모호 키워드로 판정. 이서(유원대+이서이+베트남), 리즈(아이브+유나이티드+이한범) 사고 차단.
+    """뉴스에 키워드 외 명백한 한국 인명(성씨 시작)·기관명이 다수 등장 시 모호 판정.
+    정두릅 결정 2026-06: 정규식 정밀화 — 일반 명사 토큰(옵타·슈팅·기대) 오탐 차단.
+    한국 성씨(20개 흔한 성)로 시작하는 2-4자 어구만 인명으로 인정.
     """
     if not news_items or len(news_items) < 4:
         return False, []
     blob = " ".join((it.get("title", "") + " " + it.get("desc", "")) for it in news_items[:10])
 
-    # 한국 인명 후보 (2-4자 한글 + 조사) — 키워드 자체 제외
-    person_pattern = r"([가-힣]{2,4})(?:이|가|은|는|을|를|의|에|와|과|도|만|에서|에게|로|으로)"
+    # 흔한 한국 성씨 — 이 글자로 시작 + 2~3자 더 + 띄어쓰기/조사로 끝남 = 인명
+    KOREAN_SURNAMES = "김이박최정강조윤장임한오신서권황안송류전홍고문양손배백허남심노"
+    person_pattern = r"\b([" + KOREAN_SURNAMES + r"][가-힣]{1,3})(?:\s|이|가|은|는|을|를|의|에|와|과|도|만|에서|에게|로|으로|,|\.)"
     persons = set(re.findall(person_pattern, blob))
     persons.discard(kw)
-    persons = {p for p in persons if p != kw and len(p) >= 2}
+    # 키워드의 일부면 제외 (예: 키워드 "황인범", 추출 "황인" 제외)
+    persons = {p for p in persons if p != kw and p not in kw and kw not in p}
 
-    # 기관·팀·대학 접미사
-    inst_pattern = r"[가-힣]{2,8}(?:대학교|대학|고등학교|구단|연맹|협회|위원회|연구소|병원|회사|기업|국가대표팀|유나이티드|왕조|왕가)"
+    # 기관·팀 — 명시적 접미사만
+    inst_pattern = r"[가-힣]{2,8}(?:대학교|구단|국가대표팀|유나이티드)"
     institutions = set(re.findall(inst_pattern, blob))
+    institutions = {i for i in institutions if i != kw and i not in kw}
 
     distinct_entities = list(persons) + list(institutions)
+    # 정두릅 결정 2026-06: 임계값 5 — 이서 사고(5개 추출) 차단 + 손흥민·페드리(1~4개) 통과
     if len(distinct_entities) >= 5:
         return True, distinct_entities[:8]
     return False, []
@@ -5262,17 +5273,25 @@ def run_bot():
                 log("   ⏭️  뉴스 맥락이 사건사고/금융 분쟁 → 안전상 스킵")
                 continue
 
+            # 정두릅 결정 2026-06: KNOWN_* 화이트리스트는 사용자 검증 끝난 단일 인물
+            # 동명이인·다중토픽 검사 모두 면제 (손흥민·황인범·페드리 차단 사고 해결)
+            _trusted_kw_set = set(
+                list(globals().get("KNOWN_SPORTS", [])) +
+                list(globals().get("KNOWN_ENTERTAINMENT", []))
+            )
+            _is_trusted = kw in _trusted_kw_set
+
             # ③-C 동명이인 모호 키워드 감지 (이수진·이시형처럼 여러 분야 인물)
-            if detect_homonym_keyword(kw, news_items):
+            if not _is_trusted and detect_homonym_keyword(kw, news_items):
                 log("   ⏭️  동명이인 모호 키워드 → AI 묶음 글 방지, 스킵")
                 continue
 
-            # ③-D 정두릅 결정 2026-06: 다중 토픽 모호 키워드 감지
-            # 이서(유원대+이서이+베트남) / 리즈(아이브+유나이티드+이한범) 사고 차단
-            mixed_hit, mixed_entities = detect_mixed_news_topics(news_items, kw)
-            if mixed_hit:
-                log(f"   ⏭️  뉴스에 다중 토픽 혼재 ({len(mixed_entities)}개 인물·기관): {mixed_entities[:5]} → 스킵")
-                continue
+            # ③-D 다중 토픽 모호 키워드 감지 (이서·리즈 사고 차단용이지만 false positive 빈번)
+            if not _is_trusted:
+                mixed_hit, mixed_entities = detect_mixed_news_topics(news_items, kw)
+                if mixed_hit:
+                    log(f"   ⏭️  뉴스에 다중 토픽 혼재 ({len(mixed_entities)}개): {mixed_entities[:5]} → 스킵")
+                    continue
 
             # ②-B 분류가 SKIP이면 뉴스 본문으로 한 번 더 보정 시도
             if info["category"] not in ALLOWED_CATEGORIES:
