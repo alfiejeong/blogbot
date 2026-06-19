@@ -377,6 +377,19 @@ def _call_groq(contents, label=""):
                         text = json.dumps(data, ensure_ascii=False)
                     except Exception as je:
                         log(f"   Groq JSON 정제 실패 ({label}): {str(je)[:80]}")
+                        # 정두릅 결정 2026-06: 8B raw text 응답을 강제로 minimal JSON wrap (post용)
+                        # Groq 응답 깨졌어도 텍스트 자체가 의미 있으면 살리기
+                        if label == "post" and len(text) > 200:
+                            # H2 마커 자동 삽입
+                            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+                            if len(paragraphs) >= 3:
+                                html_parts = [f"<h2>핵심 정리</h2>\n[IMG]\n<p>{paragraphs[0]}</p>"]
+                                for i, para in enumerate(paragraphs[1:4], 1):
+                                    html_parts.append(f"<h2>{i+1}번째 포인트</h2>\n[IMG]\n<p>{para}</p>")
+                                content_html = "\n".join(html_parts)
+                                wrapped = {"title": f"화제의 키워드 핵심 정리", "content_html": content_html}
+                                text = json.dumps(wrapped, ensure_ascii=False)
+                                log(f"   🔧 Groq 8B raw text → 강제 JSON wrap ({len(text)}자)")
                 time.sleep(2)
                 return SimpleNamespace(text=text)
             except requests.HTTPError as he:
@@ -1306,11 +1319,11 @@ def detect_homonym_keyword(kw, news_items):
     total = sum(field_counts.values())
     sorted_fields = sorted(field_counts.items(), key=lambda x: -x[1])
     top_field, top_count = sorted_fields[0]
-    # 정두릅 결정 2026-06: 이서·리즈 사고 — 최소 신호 5건 미만은 무조건 모호
-    # "연예 2 vs 정치 1" 같은 3건 신호로 단일 인물 판정하다 사고 발생
+    # 정두릅 결정 2026-06: 신호 5건 미만이면 데이터 부족으로 판단, 통과 (강주은·샘김 사고 완전 회복)
+    # KNOWN 외 키워드라도 신호 부족하면 신뢰성 낮아 동명이인 판단 불가 → 차단 X
     if total < 5:
-        log(f"   ⚠️ 동명이인 신호 부족 ({total}건 < 5) → 모호, 차단")
-        return True
+        log(f"   ⚠️ 동명이인 신호 부족 ({total}건 < 5) — 데이터 부족, 통과")
+        return False
 
     # 정두릅 결정 2026-06: 80% → 70%, 5배 → 3배 완화
     # 황인범(75%) 황희찬(69%) 등 명백한 스포츠 인물 차단되던 사고 해결
@@ -3908,17 +3921,27 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
         log(f"   🚫 본문에 무관 브랜드 끼워넣기 감지: {off_topic_list} — 발행 거부")
         return None, None
 
-    # 정두릅 결정 2026-06: 본문에 키워드 외 한국 인명/기관 5개 이상 → 다중 토픽 혼합 글
-    # 이서 사고: 본문에 유원대·동허이서·이서이·총장 등 7+ 등장 → 마구잡이 콘텐츠
-    _plain_body = re.sub(r"<[^>]+>", "", content)
-    _person_pat = r"([가-힣]{2,4})(?:이|가|은|는|을|를|의|에|와|과|도|만)"
-    _persons = set(re.findall(_person_pat, _plain_body))
-    _persons = {p for p in _persons if p != kw and p not in kw}
-    _inst = set(re.findall(r"[가-힣]{2,8}(?:대학교|대학|구단|연맹|협회|위원회|유나이티드)", _plain_body))
-    _distinct = list(_persons)[:15] + list(_inst)[:5]
-    if len(_distinct) >= 5:
-        log(f"   🚫 본문에 키워드 외 한국 고유명사 {len(_distinct)}개 등장 (다중 토픽 혼합): {_distinct[:5]} — 거부")
-        return None, None
+    # 정두릅 결정 2026-06: 본문 다중 토픽 검증 — 정규식 정밀화 + KNOWN_* 면제
+    # 직전 사고: 옛 정규식이 "활약·이번·시장" 같은 일반 단어를 인명으로 잡아 손흥민·황인범·페드리 등 13건 모두 차단
+    # 1) 한국 성씨로 시작하는 정확한 인명만 추출 (Fix X와 동일)
+    # 2) KNOWN_* 신뢰 키워드는 검증 자체 면제 (사용자 검증 단일 인물)
+    _trusted_body_pool = set(
+        list(globals().get("KNOWN_SPORTS", [])) +
+        list(globals().get("KNOWN_ENTERTAINMENT", []))
+    )
+    if kw not in _trusted_body_pool:
+        _plain_body = re.sub(r"<[^>]+>", "", content)
+        _KOREAN_SURNAMES = "김이박최정강조윤장임한오신서권황안송류전홍고문양손배백허남심노"
+        _person_pat = r"\b([" + _KOREAN_SURNAMES + r"][가-힣]{1,3})(?:\s|이|가|은|는|을|를|의|에|와|과|도|만|,|\.)"
+        _persons = set(re.findall(_person_pat, _plain_body))
+        _persons = {p for p in _persons if p != kw and p not in kw and kw not in p}
+        _inst = set(re.findall(r"[가-힣]{2,8}(?:대학교|구단|국가대표팀|유나이티드)", _plain_body))
+        _inst = {i for i in _inst if i != kw and i not in kw}
+        _distinct = list(_persons) + list(_inst)
+        # 임계값 8 (Fix X처럼 보수적 — 본문은 길어서 더 관대)
+        if len(_distinct) >= 8:
+            log(f"   🚫 본문에 키워드 외 명백 인명·기관 {len(_distinct)}개 등장: {_distinct[:5]} — 거부")
+            return None, None
 
     # ★ 사진 설명 사설 제거 ★
     # "○○의 사진", "○○의 드레스 사진", "사진 캡처", "사진 = ○○" 등의 사설 본문에서 제거.
