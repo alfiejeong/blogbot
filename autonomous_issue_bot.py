@@ -332,14 +332,15 @@ def _call_groq(contents, label=""):
         send_prompt = prompt
         max_tok = 4000
         if "8b" in model_name:
-            # 정두릅 결정 2026-06: max_tok 2000 → 3000 (리 유나이티드 오타 사고)
-            # 8B 본문이 중간에 끊겨 단어 절단되던 사고 — 출력 여유 확보
             max_tok = 3000
             if len(prompt) > 1800:
                 head = prompt[:1100]
                 tail = prompt[-600:]
-                send_prompt = head + "\n[...중간 생략...]\n" + tail
-                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 (양끝 보존) / max_tok={max_tok}")
+                # 정두릅 결정 2026-06: 본문 짧은 응답 사고 (119~135자) — 명시적 길이 지시 추가
+                # 8B가 양끝 prompt에서 본문 길이 지시 못 보고 짧게 응답하던 사고
+                length_directive = "\n\n[추가 지시] 본문(content_html)은 반드시 500자 이상 자세한 한국어 글로 작성. 짧게 응답하지 말 것. JSON 형식 그대로."
+                send_prompt = head + "\n[...중간 생략...]\n" + tail + length_directive
+                log(f"   ✂️  {model_name} prompt {len(prompt)}자 → {len(send_prompt)}자 (양끝+길이지시) / max_tok={max_tok}")
         # 정두릅 결정 2026-06: 70B 429는 TPM 분당 초과 — 30초 대기 후 1회 재시도 (다음 모델로 안 넘김)
         retried_429 = False
         move_to_next_model = False
@@ -1383,6 +1384,21 @@ KNOWN_SPORTS = [
     "토트넘", "바르셀로나", "레알 마드리드", "맨체스터", "맨유", "맨시티",
     "아스널", "리버풀", "첼시", "PSG", "유벤투스", "바이에른", "도르트문트",
     "EPL", "라리가", "분데스리가", "챔피언스리그", "UCL", "K리그",
+    # 정두릅 결정 2026-06: 다중 토픽 차단 사고 회복 (로스앤젤레스 다저스 등)
+    "로스앤젤레스 다저스", "LA 다저스", "다저스", "양키스", "보스턴 레드삭스",
+    "샌프란시스코 자이언츠", "휴스턴 애스트로스", "두산 베어스", "키움 히어로즈",
+    "롯데 자이언츠", "삼성 라이온즈", "한화 이글스", "기아 타이거즈",
+    "KT 위즈", "NC 다이노스", "SSG 랜더스", "LG 트윈스",
+    "오타니 쇼헤이", "오타니", "다르빗슈", "이정후", "김혜성", "김하성",
+    "리오넬 메시", "메시", "음바페", "킬리안 음바페", "호날두",
+    "엘링 홀란", "비니시우스", "라민 야말",
+    "프리미어리그", "EPL",
+    "오너", "페이즈", "T1", "젠지", "한화생명", "농심",  # LCK 팀
+    # 정두릅 결정 2026-06: 한국 매치업 KNOWN 추가 (W 면제로 통과 보장)
+    "한국 vs 멕시코", "한국 vs 일본", "한국 vs 브라질", "한국 vs 아르헨티나",
+    "한국 vs 우루과이", "한국 vs 포르투갈", "한국 vs 독일",
+    "한국 vs 스페인", "한국 vs 프랑스", "한국 vs 잉글랜드",
+    "한국 멕시코", "한국 일본", "한국 브라질", "한국 우루과이", "한국 포르투갈",
     # 정두릅 결정 2026-06: 월드컵 시즌 — 외국팀 선수 휴리스틱 강제 sports
     "해리 케인", "베르나르두 실바", "후벵 디아스", "페페",
     "로드리", "다니 올모", "페란 토레스", "알바로 모라타",
@@ -1510,6 +1526,15 @@ KNOWN_PERSON_OR_BRAND = [
 ]
 # 예능·연애 프로그램·드라마 제목들 — 핫플로 오인분류되는 거 방지
 KNOWN_ENTERTAINMENT = [
+    # 정두릅 결정 2026-06: 다중 토픽 차단 사고 회복 (톰 홀랜드, 션, 은현 장 등)
+    "톰 홀랜드", "젠데이아", "로버트 다우니 주니어", "스칼렛 요한슨",
+    "션", "지누션", "은현 장", "이서이", "송지효", "박명수",
+    "놀면 뭐하니", "런닝맨", "무한도전", "유재석",
+    "하이브", "SM엔터테인먼트", "JYP", "YG엔터테인먼트",
+    "스트레이키즈", "엔하이픈", "투모로우바이투게더", "ATEEZ",
+    "에스파", "있지", "ITZY", "트와이스", "블랙핑크",
+    "BTS", "방탄소년단", "뉴진스", "아이브", "(여자)아이들",
+    "하트시그널", "환승연애", "솔로지옥",
     # 예능 프로그램
     "나는솔로", "나는 솔로", "나솔", "솔로지옥", "환승연애", "하트시그널",
     "돌싱글즈", "체인지데이즈", "러브캐쳐", "더글로리", "스우파",
@@ -1708,6 +1733,15 @@ def heuristic_is_place(kw):
 def classify_keyword(kw):
     # ━━━ 0순위: 휴리스틱 단언 — 명확하면 Gemini 호출 스킵해 quota 절약 ━━━
     # (정두릅 결정 2026-05: Gemini free tier 한도 빠듯해 호출 수 절감)
+    # 정두릅 결정 2026-06: "한국 vs ○○" 매치업은 즉시 sports 단언
+    if " vs " in kw and any(c in kw for c in ["한국", "korea", "Korea"]):
+        log(f"   ⚡ 휴리스틱 단언: {kw} → sports (매치업 즉시 sports)")
+        return {
+            "category": "sports", "region": None,
+            "image_queries": [f"{kw}", "Korea football match", "World Cup Korea"],
+            "is_person": False, "is_brand_or_show": False,
+        }
+
     if heuristic_is_sports(kw):
         log(f"   ⚡ 휴리스틱 단언: {kw} → sports (Gemini 스킵)")
         return {
@@ -3081,18 +3115,13 @@ def filter_images_by_vision(pool, kw, category):
             # wikipedia/wikimedia 신뢰 (인물이 아닌 팀/제품/리그 → 무관 사진 위험 낮음)
             # entertainment는 인물 매칭 정확도가 핵심이라 거부 유지
             is_wiki = "wiki" in source.lower()
-            # 정두릅 결정 2026-06: IT 제외 — "google usa" 글에 옛 건물·자전거 들어간 사고
-            # IT 키워드는 너무 일반적이라 wiki 매칭이 무관 이미지로 가는 사례 빈번
             visually_safe_cat = category in ("sports", "auto", "game")
-            # 추가 안전장치: credit/caption에 키워드 토큰이 등장해야 wiki 신뢰
-            credit_full = (img.get("credit", "") or "") + " " + (img.get("caption", "") or "")
-            kw_tokens = [t for t in re.split(r"\s+", kw) if len(t) >= 2]
-            kw_in_credit = any(tok.lower() in credit_full.lower() for tok in kw_tokens)
-            if is_wiki and visually_safe_cat and kw_in_credit:
+            # 정두릅 결정 2026-06: 키워드 매칭 조건 폐기 — 손흥민·황인범 차단 7건 사고
+            # sports/auto/game 카테고리는 wiki 출처면 무조건 1장 신뢰 (운영자 판단: 0건보다 가끔 무관 낫다)
+            # IT는 옛 건물·자전거 사고 재발 위험으로 제외 유지
+            if is_wiki and visually_safe_cat:
                 accepted.append(img)
-                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}, 키워드 매칭): {credit_short}")
-            elif is_wiki and visually_safe_cat:
-                log(f"   ✗ Vision 실패 + wiki 출처 + 키워드 미매칭 → 거부: {credit_short}")
+                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}): {credit_short}")
             else:
                 log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
         elif score >= threshold:
@@ -3836,8 +3865,10 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     # 본문 너무 짧으면 (응답이 잘림 또는 빈약한 글) None 반환 → 발행 스킵
     # (정두릅 결정 2026-06: Llama가 quota로 짧게 응답하는 사고 → 350 → 250자 완화)
     plain_text_len = len(re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content))
-    if plain_text_len < 250:
-        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 250) — 빈약/잘림 의심, 스킵")
+    # 정두릅 결정 2026-06: 250 → 180자 완화 (8B 한계 + 라이즈·레이·놀면뭐하니 차단 사고)
+    # 짧지만 알맹이 있는 글이 0건 발행보다 낫다 (운영자 판단)
+    if plain_text_len < 180:
+        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 180) — 빈약/잘림 의심, 스킵")
         return None, None
 
     # 정두릅 결정 2026-06: 본문 단어 절단 감지 (리 유나이티드 오타 사고)
@@ -5275,9 +5306,18 @@ def run_bot():
 
             # 정두릅 결정 2026-06: KNOWN_* 화이트리스트는 사용자 검증 끝난 단일 인물
             # 동명이인·다중토픽 검사 모두 면제 (손흥민·황인범·페드리 차단 사고 해결)
+            # 정두릅 결정 2026-06: KNOWN_IT 신뢰 풀 신설 — 오픈AI 다중 토픽 차단 사고
+            KNOWN_IT_TRUSTED = [
+                "오픈AI", "OpenAI", "챗GPT", "ChatGPT", "구글", "Google",
+                "갤럭시 S25", "갤럭시 Z 플립7", "갤럭시 Z 폴드7", "아이폰 17",
+                "맥북", "아이패드", "에어팟", "메타 AI", "클로드", "Claude",
+                "퍼플렉시티", "삼성전자", "엔비디아", "NVIDIA",
+                "테슬라", "Tesla", "현대차", "기아",
+            ]
             _trusted_kw_set = set(
                 list(globals().get("KNOWN_SPORTS", [])) +
-                list(globals().get("KNOWN_ENTERTAINMENT", []))
+                list(globals().get("KNOWN_ENTERTAINMENT", [])) +
+                KNOWN_IT_TRUSTED
             )
             _is_trusted = kw in _trusted_kw_set
 
