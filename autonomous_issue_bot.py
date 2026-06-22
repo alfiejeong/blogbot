@@ -387,7 +387,19 @@ def _call_groq(contents, label=""):
                                 for i, para in enumerate(paragraphs[1:4], 1):
                                     html_parts.append(f"<h2>{i+1}번째 포인트</h2>\n[IMG]\n<p>{para}</p>")
                                 content_html = "\n".join(html_parts)
-                                wrapped = {"title": f"화제의 키워드 핵심 정리", "content_html": content_html}
+                                # 정두릅 결정 2026-06: 폴백 제목 다양화 (Fix S 차단 회피)
+                                # 사고: 해리 케인·레이·BTS 모두 동일 제목 → 패턴 중복 차단
+                                import random as _rnd
+                                _fallback_suffixes = [
+                                    "주목할 만한 핵심 포인트",
+                                    "이번에 짚어볼 만한 흐름",
+                                    "지금 알아두면 좋을 것",
+                                    "어제 이슈 요약",
+                                    "지금 분위기가 다르다",
+                                    "사람들이 관심 보이는 이유",
+                                ]
+                                _alt = _rnd.choice(_fallback_suffixes)
+                                wrapped = {"title": f"이슈 키워드 {_alt}", "content_html": content_html}
                                 text = json.dumps(wrapped, ensure_ascii=False)
                                 log(f"   🔧 Groq 8B raw text → 강제 JSON wrap ({len(text)}자)")
                 time.sleep(2)
@@ -396,14 +408,9 @@ def _call_groq(contents, label=""):
                 last_err = he
                 status = getattr(he.response, "status_code", None)
                 if status == 429:
-                    # 70B의 첫 429는 TPM 회복 기다리기 (30초)
-                    if "70b" in model_name and not retried_429:
-                        retried_429 = True
-                        log(f"   ⏳ Groq[{model_name}] 429 → 30초 대기 후 재시도 (TPM 회복)")
-                        time.sleep(30)
-                        continue  # while 루프 — 같은 모델 재시도
-                    log(f"   ⚠️ Groq[{model_name}] 429 → 다음 모델로 분산")
-                    time.sleep(1)
+                    # 정두릅 결정 2026-06: 30초 대기 폐기 — 15분 타임아웃 주범
+                    # 즉시 8B로 분산. 시간 절약 우선
+                    log(f"   ⚠️ Groq[{model_name}] 429 → 즉시 다음 모델로 분산 (시간 절약)")
                     move_to_next_model = True
                     continue
                 log(f"   Groq[{model_name}] HTTP {status}: {str(he)[:60]}")
@@ -1349,28 +1356,72 @@ def detect_homonym_keyword(kw, news_items):
 def detect_mixed_news_topics(news_items, kw):
     """뉴스에 키워드 외 명백한 한국 인명(성씨 시작)·기관명이 다수 등장 시 모호 판정.
     정두릅 결정 2026-06: 정규식 정밀화 — 일반 명사 토큰(옵타·슈팅·기대) 오탐 차단.
-    한국 성씨(20개 흔한 성)로 시작하는 2-4자 어구만 인명으로 인정.
+    한국 성씨로 시작하는 2-4자 어구 + 일반 단어 사전으로 필터링.
     """
     if not news_items or len(news_items) < 4:
         return False, []
     blob = " ".join((it.get("title", "") + " " + it.get("desc", "")) for it in news_items[:10])
 
-    # 흔한 한국 성씨 — 이 글자로 시작 + 2~3자 더 + 띄어쓰기/조사로 끝남 = 인명
+    # 흔한 한국 성씨
     KOREAN_SURNAMES = "김이박최정강조윤장임한오신서권황안송류전홍고문양손배백허남심노"
     person_pattern = r"\b([" + KOREAN_SURNAMES + r"][가-힣]{1,3})(?:\s|이|가|은|는|을|를|의|에|와|과|도|만|에서|에게|로|으로|,|\.)"
     persons = set(re.findall(person_pattern, blob))
     persons.discard(kw)
-    # 키워드의 일부면 제외 (예: 키워드 "황인범", 추출 "황인" 제외)
     persons = {p for p in persons if p != kw and p not in kw and kw not in p}
 
-    # 기관·팀 — 명시적 접미사만
+    # 정두릅 결정 2026-06: 일반 단어 사전 — 직전 로그의 모든 오탐 토큰 박아둠
+    COMMON_WORDS = {
+        # 이/이번/이날 류
+        "이번", "이전", "이후", "이어", "이를", "이날", "이를테면", "이들", "이러한", "이렇게",
+        "이상의", "이라고", "이라며", "이상", "이지만", "이상한", "이번엔", "이렇", "이래", "이렇듯",
+        "이래서", "이미", "이전에", "이번에는", "이끄는", "이라크는", "이라크전", "이라크",
+        "이끄는", "이재황", "이학생", "이듬해", "이라며", "이상하게",
+        # 박/박세웅 등 사고 토큰 (이름 같이 보이지만 일반 단어)
+        "박건일이", "박건일", "박지훈", "박성", "박정",
+        # 임/임원/임영웅 류
+        "임원진", "임할", "임원", "임박했다",
+        # 정/정민호 류
+        "정민호도", "정의선이", "정체성을", "정상", "정상적", "정도", "정확", "정확한", "정상적으",
+        "정파", "정치권", "정치는", "정되었다",
+        # 전/전국 류
+        "전국", "전동화", "전체", "전국적", "전후", "전반", "전제", "전기차와", "전반에", "전한다",
+        "전했다", "전문가", "전문가들", "전의산", "전통", "전세계", "전체회의",
+        # 최/최고 류
+        "최종", "최근", "최고", "최고의", "최대", "최소", "최보윤", "최다",
+        # 오/오늘 류
+        "오는", "오늘", "오후", "오전", "오는데", "오기는",
+        # 한 류
+        "한꺼번에", "한이", "한국전", "한국", "한국은", "한국이",
+        # 노/노조 류
+        "노조", "노동조합", "노노갈등", "노력해야", "노리는", "노르웨이",
+        # 강/긍정/대한민국 류
+        "강력하지", "긍정적", "남아공과", "자신감", "대한민국", "강자인",
+        # 서/송/신 류 (직전 사고 토큰)
+        "서범수", "송승준", "신차", "신유", "신화", "신형", "신발", "심심",
+        # 윤/윤건영 류
+        "윤건영",
+        # 일반 명사 토큰
+        "남다른", "양의", "양산차", "고향에서", "고성", "문경", "정글에", "권인서는",
+        "장세를", "이유로", "이번에도", "이번에는", "안내", "안으로", "배치된",
+        # 추가
+        "정기적으", "한계를", "이용률이", "전달할", "신선한", "정호진", "황덕순",
+        "박지훈", "한편", "배우를", "이상형을", "이라고",
+        "홍지윤",
+        # 본문 차단 사고 (Fix II에서도 안 잡힌 추가)
+        "기대된다", "기대를", "기대", "기회", "차례", "활약", "최고의", "전에",
+        "발걸음", "봐야겠지", "필요하다", "평가하", "수준", "무대", "분석",
+        "출전했", "복귀", "긍정적", "영웅", "남아공과",
+    }
+    persons = {p for p in persons if p not in COMMON_WORDS}
+
+    # 기관·팀
     inst_pattern = r"[가-힣]{2,8}(?:대학교|구단|국가대표팀|유나이티드)"
     institutions = set(re.findall(inst_pattern, blob))
     institutions = {i for i in institutions if i != kw and i not in kw}
 
     distinct_entities = list(persons) + list(institutions)
-    # 정두릅 결정 2026-06: 임계값 5 — 이서 사고(5개 추출) 차단 + 손흥민·페드리(1~4개) 통과
-    if len(distinct_entities) >= 5:
+    # 임계값 6 (5 → 6 완화) — 함은정·박세웅·윤상현 등 정상 키워드 통과
+    if len(distinct_entities) >= 6:
         return True, distinct_entities[:8]
     return False, []
 
@@ -1548,6 +1599,15 @@ KNOWN_ENTERTAINMENT = [
     "에스파", "있지", "ITZY", "트와이스", "블랙핑크",
     "BTS", "방탄소년단", "뉴진스", "아이브", "(여자)아이들",
     "하트시그널", "환승연애", "솔로지옥",
+    # 정두릅 결정 2026-06: 직전 로그 차단 회복
+    "아이유", "이수근", "임영웅", "탁재훈", "고윤정", "박수홍",
+    "함은정", "홍명보", "강주은", "샘김",
+    "가요무대", "복면가왕", "유 퀴즈 온 더 블럭", "나는 솔로",
+    "지옥에서 온 판사", "어쩌다 사장",
+    "BTS 정국", "BTS 지민", "BTS 뷔", "BTS RM", "BTS 슈가", "BTS 진",
+    "BTS 제이홉",
+    "레이", "리즈", "오너",  # 아이브 멤버 + LCK 등
+    "박건일",  # 정상 인명 (다중 토픽 사고 오탐 회복)
     # 예능 프로그램
     "나는솔로", "나는 솔로", "나솔", "솔로지옥", "환승연애", "하트시그널",
     "돌싱글즈", "체인지데이즈", "러브캐쳐", "더글로리", "스우파",
@@ -3062,6 +3122,10 @@ def verify_image_with_vision(image_url, kw, category):
             ],
             label="vision",
         )
+        # 정두릅 결정 2026-06: res가 None일 때 'NoneType has no attribute text' 예외 방지
+        # _GEMINI_DAILY_QUOTA_DEAD 시 res=None 반환 → 깨끗이 처리
+        if res is None:
+            return None
         txt = (res.text or "").strip()
         # JSON 파싱 우선
         score = None
@@ -3129,10 +3193,11 @@ def filter_images_by_vision(pool, kw, category):
             # entertainment는 인물 매칭 정확도가 핵심이라 거부 유지
             is_wiki = "wiki" in source.lower()
             visually_safe_cat = category in ("sports", "auto", "game")
-            # 정두릅 결정 2026-06: 키워드 매칭 조건 폐기 — 손흥민·황인범 차단 7건 사고
-            # sports/auto/game 카테고리는 wiki 출처면 무조건 1장 신뢰 (운영자 판단: 0건보다 가끔 무관 낫다)
-            # IT는 옛 건물·자전거 사고 재발 위험으로 제외 유지
-            if is_wiki and visually_safe_cat:
+            # 정두릅 결정 2026-06: KNOWN_ENTERTAINMENT 키워드(BTS·방탄소년단 등)는 entertainment에서도 wiki 신뢰
+            # 사용자 검증된 명확한 인물·그룹이면 wiki 사진 신뢰성 ↑ (옛 건물·자전거 사고는 vague 키워드에서만 발생)
+            _trusted_ent = set(globals().get("KNOWN_ENTERTAINMENT", []))
+            kw_trusted_ent = kw in _trusted_ent
+            if is_wiki and (visually_safe_cat or (category == "entertainment" and kw_trusted_ent)):
                 accepted.append(img)
                 log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}): {credit_short}")
             else:
@@ -5280,6 +5345,12 @@ def run_bot():
             log(f"\n🛑 1회 실행 한도({MAX_POSTS_PER_RUN}개) 도달, 종료")
             break
 
+        # 정두릅 결정 2026-06: 사이클당 키워드 처리 한도 — 15분 timeout 안전망
+        _kw_processed = locals().get('_kw_processed', 0) + 1
+        if _kw_processed > 15:
+            log(f"\n⏰ 1회 키워드 처리 한도 15개 도달 — 다음 사이클에서 나머지 처리")
+            break
+
         log(f"\n🔥 [{kw}] 처리 시작")
         try:
             # ⓪-A 부적합 토픽 차단 (코인/주식/매체명/정치/IT/날씨 등 - 분류 전 즉시 스킵)
@@ -5479,11 +5550,14 @@ def run_bot():
             log(f"   🏷  WP 카테고리: {info['category']} → id={cat_id}")
             log(f"   🏷  WP 태그: {auto_tags} → {len(tag_ids or [])}개 매핑")
 
-            # 정두릅 결정 2026-06: 패턴 중복이면 본문도 진부할 가능성 → 재포맷 대신 발행 스킵
-            # 이전: 제목만 다른 톤으로 바꿔서 발행 → 본문과 제목 미스매치로 "알맹이 빈 글" 사고
-            # ("포르투갈 대 콩고 민주 공화국 팬들이 주목한 포인트" 사례)
-            if is_title_pattern_duplicate(title, kw, recent_titles):
-                log(f"   🚫 제목 형식이 최근 발행과 동일 패턴 → 본문 진부 우려, 발행 스킵")
+            # 정두릅 결정 2026-06: 패턴 중복 검사 완화 — 같은 사이클 발행은 비교 제외
+            # 직전 사고: 손흥민 발행 → 황인범도 비슷한 톤 → 차단 (회당 1건 한계)
+            # 이전(2일 캐시) 글과만 패턴 비교. 같은 사이클 내 다양성은 풀로 보장.
+            # recent_titles는 캐시(이전 글)와 within-run(같은 사이클)이 섞여 있음
+            # → 캐시 만큼만 패턴 비교에 사용
+            _patterns_to_check = recent_titles[posted_count:] if posted_count else recent_titles
+            if is_title_pattern_duplicate(title, kw, _patterns_to_check):
+                log(f"   🚫 제목 형식이 이전 발행(캐시)과 동일 패턴 → 본문 진부 우려, 발행 스킵")
                 continue
 
             r = post_to_wordpress(
@@ -5533,7 +5607,8 @@ def run_bot():
         except Exception as e:
             log(f"🚨 [{kw}] 오류: {e}")
 
-        time.sleep(8)
+        # 정두릅 결정 2026-06: 8s → 2s (15분 타임아웃 주범 일부)
+        time.sleep(2)
 
     log(f"\n✅ 실행 종료. 이번 회차 신규 발행: {posted_count}개")
 
