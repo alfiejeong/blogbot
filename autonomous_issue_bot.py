@@ -2372,28 +2372,73 @@ def is_meta_or_ad_image(src, caption):
     return False
 
 
-def caption_matches_keyword(caption, kw):
+# 정두릅 결정 2026-06: 카테고리별 충돌 단어 — 캡션에 있으면 동음이의어 다른 인물 사진 추정
+# 사고: 김도영(야구) 글에 트레저 도영(아이돌) 사진 박힘
+CATEGORY_CAPTION_CONFLICTS = {
+    "sports": [
+        # 스포츠 글이면 캡션에 이런 단어 있으면 안 됨 → 동음이의어 연예인 사진
+        "아이돌", "걸그룹", "보이그룹", "아이브", "트레저", "엔하이픈", "스트레이키즈",
+        "방탄소년단", "BTS", "뉴진스", "블랙핑크", "에스파", "있지", "ITZY",
+        "트와이스", "투모로우바이투게더", "ATEEZ",
+        "배우", "드라마", "예능", "MC", "OST", "팬미팅", "콘서트",
+        "엔터테인먼트", "기획사", "소속사", "데뷔",
+        "SM", "JYP", "YG", "하이브",
+        "패션", "화보", "런웨이", "뷰티", "메이크업",
+    ],
+    "entertainment": [
+        # 엔터 글이면 캡션에 이런 단어 있으면 안 됨 → 동음이의어 스포츠 선수 사진
+        "프로야구", "KBO", "K리그", "구단", "선수단", "타석", "이닝", "골",
+        "득점", "어시스트", "리그", "감독", "코치", "프로농구", "KBL",
+        "월드컵", "올림픽", "국가대표", "선수",
+        "전반전", "후반전", "경기장",
+    ],
+    "auto": [
+        "아이돌", "배우", "드라마", "예능", "선수", "스포츠",
+    ],
+    "game": [
+        "아이돌", "배우", "드라마", "프로야구", "축구 선수",
+    ],
+    "it": [
+        "아이돌", "배우", "드라마", "예능", "선수", "스포츠",
+    ],
+}
+
+
+def caption_has_category_conflict(caption, category):
+    """캡션에 카테고리와 충돌하는 단어가 있으면 True (동음이의어 다른 인물 사진 추정)."""
+    if not caption or not category:
+        return False
+    conflicts = CATEGORY_CAPTION_CONFLICTS.get(category, [])
+    for term in conflicts:
+        if term in caption:
+            return True
+    return False
+
+
+def caption_matches_keyword(caption, kw, category=None, info=None):
     """
     캡션 텍스트에 키워드(또는 토큰) 중 하나라도 포함되는지.
     인물 키워드에서 '제3자 사진' 차단용. 한글 이름은 정확 매칭.
 
     정두릅 결정 2026-06: 짧은 키워드(4자 이하)는 단어 경계 매칭 필수.
-    "페이즈"(LCK 선수) 키워드가 "페이즈3 성과공유회"(스타트업) 캡션에 잘못 매칭되는 사고 차단.
+    정두릅 결정 2026-06: category 인자 추가 — 카테고리 충돌 단어 있으면 거부
+    (김도영 야구 → 트레저 도영 아이돌 사진 사고 차단)
     """
     if not caption or not kw:
         return False
 
     def _word_match(text, word):
-        """word가 text에 단어로 등장하는지 — 직후에 합성 한글/숫자 안 붙어야 함.
-        한 글자 조사(가/는/을/이/에/와/도/만/의/로/과/께/씨 등)는 단어 경계로 허용."""
+        """word가 text에 단어로 등장하는지 — 직후에 합성 한글/숫자 안 붙어야 함."""
         if len(word) <= 4:
-            # 직후 문자가 숫자거나 한글 두 글자 이상 합성(예: '페이즈3', '페이즈코드')이면 차단
-            # 단 한 글자 조사(가/는/을/이/에/도/만/의/로/과/께/씨) + 공백·종결은 통과
-            # 패턴: word 직후가 (숫자) 또는 (한글 + 한글) 또는 (영문 + 영문)이면 차단
             pattern = re.escape(word) + r"(?![0-9]|[가-힣][가-힣]|[A-Za-z][A-Za-z])"
             return bool(re.search(pattern, text))
         return word in text
 
+    # 1. 카테고리 충돌 단어 검사 (인물 키워드 + 카테고리 알면) — 동음이의어 차단
+    if category and caption_has_category_conflict(caption, category):
+        return False
+
+    # 2. 키워드 본문 매칭
     if _word_match(caption, kw):
         return True
     tokens = [t for t in re.split(r"\s+", kw.strip())
@@ -2983,11 +3028,12 @@ def collect_place_images_via_naver_local(kw, target=3):
     return out
 
 
-def collect_korean_press_images(items, kw, target=3, require_keyword_match=False, allow_show_capture=False):
+def collect_korean_press_images(items, kw, target=3, require_keyword_match=False, allow_show_capture=False, category=None):
     """
     0순위 이미지 소스: 국내 언론사 (저작권 안전 캡션만).
     items: fetch_naver_news_items() 결과 (재사용해서 API 절약).
     require_keyword_match: 인물 키워드일 때 True. 캡션에 키워드 없으면 거부 (제3자 사진 차단).
+    category: 동음이의어 차단용. sports/entertainment/auto 등. (김도영 야구 vs 트레저 도영 사고 차단)
     """
     if not items:
         return []
@@ -3030,8 +3076,14 @@ def collect_korean_press_images(items, kw, target=3, require_keyword_match=False
                 continue
             # 3차: 인물 키워드는 캡션에 본인 이름이 반드시 있어야 채택.
             # 매니지먼트사/기획사 단서만 있고 본인 이름이 없으면 거부
-            # (소속사가 같은 기사에 다른 소속 가수 사진을 함께 배포하는 경우 차단).
-            if require_keyword_match and not caption_matches_keyword(caption, kw):
+            # 정두릅 결정 2026-06: category 전달 — 동음이의어 다른 인물 사진 차단
+            # (김도영 야구 vs 트레저 도영 아이돌 사고)
+            if require_keyword_match and not caption_matches_keyword(caption, kw, category=category):
+                rejected_no_kw_match += 1
+                continue
+            # 추가 안전장치: category 전달 안 됐어도 카테고리 충돌 단어 보고만 (디버그)
+            if category and caption_has_category_conflict(caption, category):
+                log(f"   ⛔ 카테고리 충돌 캡션 차단 ({category}): {caption[:60]}")
                 rejected_no_kw_match += 1
                 continue
             wp_id, wp_url = rehost_image_to_wp(img_src, referer=art_url)
@@ -3258,6 +3310,7 @@ def collect_images(queries, kw, category, target=5, news_items=None,
             news_items, kw, target=target,
             require_keyword_match=require_match,
             allow_show_capture=allow_show_capture,
+            category=category,  # 정두릅 결정 2026-06: 카테고리 충돌 차단 (김도영 사고)
         ))
     if not is_place:
         log(f"   [tier0 국내언론] {len(pool)}장")
