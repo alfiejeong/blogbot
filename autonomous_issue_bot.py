@@ -3621,6 +3621,17 @@ READABILITY_GUIDELINES = """
   → IT는 "이번엔 뭐가 달라졌어?", "어떻게 쓰면 좋아?"
   → 연예는 "요즘 어떤 활동?", "팬들 반응은?"
 
+[★ 구체 사실 필수 — 알맹이 있는 글만 ★]
+- 본문에 반드시 다음 구체 정보를 뉴스 컨텍스트에서 인용해 박아라:
+  · 정확한 일자(예: "6월 19일", "지난주 금요일")
+  · 정확한 숫자(평점, 시간, 득점, 어시스트 수, 슈팅 횟수 등)
+  · 상대팀·맥락 (예: "체코전 후반 30분", "남아공 전반 12분")
+  · 결정적 장면의 구체 묘사 (예: "박스 안 슛이 골키퍼 정면", "오른쪽 윙어 크로스를 헤더로")
+- 추상 표현 금지: "기대된다", "대단했다", "주목된다", "활약이 빛난다" 같은 알맹이 없는 구절 X
+- "어제·오늘 아침·방금" 같은 모호 시간 표현 절대 금지 — 정확한 일자/요일/매치명 사용
+- 본문 350자 이상 + 구체 숫자 최소 2개 + 정확 일자 1개 이상 필수
+- 일반론 한 줄 + 추상 한 줄 = 발행 X. 사실 한 줄에 최소 2개 구체 정보 박기
+
 [가독성 절대 원칙 — Yoast SEO Readability 점수 향상]
 - **한 문장 60자 이내**. 길어지면 두 문장으로 나눠라. 쉼표로 길게 잇지 말 것.
 - **연결어를 자연스럽게 분포**: '근데', '그런데', '솔직히', '그래서', '그러고 보면',
@@ -3996,16 +4007,41 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     # 본문 너무 짧으면 (응답이 잘림 또는 빈약한 글) None 반환 → 발행 스킵
     # (정두릅 결정 2026-06: Llama가 quota로 짧게 응답하는 사고 → 350 → 250자 완화)
     plain_text_len = len(re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content))
-    # 정두릅 결정 2026-06: 250 → 180자 완화 (8B 한계 + 라이즈·레이·놀면뭐하니 차단 사고)
-    # 짧지만 알맹이 있는 글이 0건 발행보다 낫다 (운영자 판단)
-    if plain_text_len < 180:
-        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 180) — 빈약/잘림 의심, 스킵")
+    # 정두릅 결정 2026-06: 180 → 300자 (이재성 알맹이 없는 글 사고)
+    # 사용자: "꼴랑 한 줄로 콘텐츠가 끝나" → 짧으면 거부 + 알맹이 검사 병행
+    if plain_text_len < 300:
+        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 300) — 알맹이 부족, 스킵")
         return None, None
 
     # 정두릅 결정 2026-06: 본문 단어 절단 감지 (리 유나이티드 오타 사고)
     truncated, trunc_reason = detect_truncated_body(content)
     if truncated:
         log(f"   ⚠️ 본문 잘림 감지: {trunc_reason} — 발행 거부")
+        return None, None
+
+    # 정두릅 결정 2026-06: 알맹이 부족 검사 (이재성 사고)
+    # 본문에 구체 사실(숫자/일자/매치/평점)이 없으면 추상 글로 판정 → 거부
+    plain_body = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content)
+    # 숫자 카운트 (구체 사실의 지표)
+    num_count = len(re.findall(r"\d+", plain_body))
+    # 추상 표현 카운트 (알맹이 없는 글의 지표)
+    abstract_phrases = [
+        "기대된다", "기대를 가지", "기대됩니다", "주목된다", "더욱 중요해",
+        "대단한", "엄청난", "정말 대단", "흥미로운", "주목할 만한",
+        "관심이 모이", "사람들은", "팬들은", "많은 관심", "큰 관심",
+        "더욱 빛난", "더욱 빛났", "활약이 기대",
+    ]
+    abstract_count = sum(plain_body.count(p) for p in abstract_phrases)
+    # 추상 표현이 본문 길이 대비 너무 많으면 거부 (구체 사실 부족 신호)
+    if abstract_count >= 4 and num_count <= 1:
+        log(f"   ⚠️ 알맹이 부족 (추상 표현 {abstract_count}회 / 숫자 {num_count}회) — 발행 거부")
+        return None, None
+
+    # 정두릅 결정 2026-06: 모호 시간 표현 차단 (이재성 "어제" 잘못 표기 사고)
+    # 봇은 매일 돌므로 "어제"가 실제 어제와 다를 수 있음. 정확한 일자 강제
+    vague_time_in_title = any(t in title for t in ["어제", "오늘 아침", "방금"])
+    if vague_time_in_title:
+        log(f"   ⚠️ 제목에 모호 시간 표현 — 정확한 일자 누락 위험, 거부")
         return None, None
 
     # H2가 충분히 안 들어왔으면(잘린 글) 스킵
@@ -5433,7 +5469,7 @@ def run_bot():
                 f"is_person={info.get('is_person')} is_brand={info.get('is_brand_or_show')}")
 
             # ③ 이슈 컨텍스트 수집 (네이버 뉴스) — 분류 폴백 + 글의 사실 근거 양쪽
-            news_items = fetch_naver_news_items(kw, display=10)
+            news_items = fetch_naver_news_items(kw, display=15)
             news_ctx = build_news_context(news_items)
             log(f"   → 뉴스 컨텍스트: {len(news_items)}건 / {len(news_ctx)}자")
 
