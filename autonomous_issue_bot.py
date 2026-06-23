@@ -172,6 +172,47 @@ def detect_truncated_body(content):
         return True, "본문에 절단된 '리 유나이티드' 패턴 (리즈 사고 차단)"
     return False, ""
 
+
+
+def detect_repeated_content(content):
+    """본문 반복 검출 — 2단 검증.
+    1) 문장 단위: 동일/유사 문장(10자+)이 2번+ 등장하면 차단
+    2) 어구 단위: 12자 슬라이딩 윈도우, 4번+ 등장하면 차단
+    정두릅 결정 2026-06: 포르투갈 vs 우즈베키스탄 사고 — Llama 반복 본문
+    """
+    if not content:
+        return False, []
+    plain = re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content)
+    plain = re.sub(r"\s+", " ", plain).strip()
+
+    from collections import Counter
+
+    # 1) 문장 단위 — 마침표/물음표/느낌표/줄바꿈으로 분할
+    sentences = re.split(r"[.!?。\n]+", plain)
+    sentences = [s.strip() for s in sentences if len(s.strip()) >= 10]
+    # 문장 정규화 (조사 차이만 있는 경우 통일)
+    def normalize(s):
+        return re.sub(r"[\s,()'\"]+", "", s)
+    norm_sents = [normalize(s) for s in sentences]
+    sent_counts = Counter(norm_sents)
+    repeated_sents = [(s, c) for s, c in sent_counts.most_common(5) if c >= 2]
+    if repeated_sents:
+        return True, [(s[:40] + "...", c) for s, c in repeated_sents[:3]]
+
+    # 2) 어구 단위 (백업) — 12자 윈도우 4번+
+    if len(plain) < 50:
+        return False, []
+    windows = []
+    for i in range(0, len(plain) - 12 + 1, 3):
+        windows.append(plain[i:i + 12])
+    win_counts = Counter(windows)
+    repeated_phrases = [(w, c) for w, c in win_counts.most_common(5) if c >= 4]
+    if repeated_phrases:
+        return True, [(w + "...", c) for w, c in repeated_phrases[:3]]
+
+    return False, []
+
+
 def detect_off_topic_brands(content_text, kw, threshold=2):
     """본문 안에 키워드와 무관한 빅테크/브랜드가 N개 이상 언급되면 (True, 목록) 반환.
     키워드가 자체 브랜드를 가리키는 경우(예: "구글 USA")는 그 브랜드 제외."""
@@ -2384,6 +2425,16 @@ CATEGORY_CAPTION_CONFLICTS = {
         "엔터테인먼트", "기획사", "소속사", "데뷔",
         "SM", "JYP", "YG", "하이브",
         "패션", "화보", "런웨이", "뷰티", "메이크업",
+        # 정두릅 결정 2026-06: 무관 시각 단어 추가 (지도·경기장·로고 사진 차단)
+        # 사고: "포르투갈 VS 우즈베키스탄" 글에 지도·경기장 사진
+        "지도", "map", "위치", "location",
+        "엠블럼", "emblem", "엠블레마", "로고", "logo",
+        "위치 표시", "지도에서", "위치도", "관할 지역",
+        "구역도", "경계", "행정구역",
+        # 매치업 키워드 안전장치 — 경기장 전경 사진 차단
+        "스타디움 전경", "stadium view", "구장 외관", "경기장 전경",
+        "arena view", "필드 전경", "잔디", "관중석",
+        "정문", "외부 모습", "건물 외관",
     ],
     "entertainment": [
         # 엔터 글이면 캡션에 이런 단어 있으면 안 됨 → 동음이의어 스포츠 선수 사진
@@ -2405,12 +2456,15 @@ CATEGORY_CAPTION_CONFLICTS = {
 
 
 def caption_has_category_conflict(caption, category):
-    """캡션에 카테고리와 충돌하는 단어가 있으면 True (동음이의어 다른 인물 사진 추정)."""
+    """캡션에 카테고리와 충돌하는 단어가 있으면 True (동음이의어 다른 인물 사진 추정).
+    정두릅 결정 2026-06: case insensitive 매칭 (FIFA Logo / logo 모두 잡음)
+    """
     if not caption or not category:
         return False
     conflicts = CATEGORY_CAPTION_CONFLICTS.get(category, [])
+    caption_low = caption.lower()
     for term in conflicts:
-        if term in caption:
+        if term.lower() in caption_low:
             return True
     return False
 
@@ -3632,6 +3686,18 @@ READABILITY_GUIDELINES = """
 - 본문 350자 이상 + 구체 숫자 최소 2개 + 정확 일자 1개 이상 필수
 - 일반론 한 줄 + 추상 한 줄 = 발행 X. 사실 한 줄에 최소 2개 구체 정보 박기
 
+[★★ 사실 추측 절대 금지 — 가장 중요한 원칙 ★★]
+- 뉴스 컨텍스트에 명시되지 않은 사실은 절대 추측해서 박지 마라.
+- "최초", "역사상 첫", "신기록", "처음으로", "사상 최다/최소" 같은 단정은
+  뉴스 컨텍스트에 그 표현이 명시된 경우에만 사용. 추측 X.
+- 정확한 사실 모르면 그 부분을 빼라. 추측해서 채우는 것보다 빠뜨리는 게 낫다.
+- 사고 예시 (절대 금지):
+  · "○○가 월드컵 역사상 첫 골" (뉴스에 없으면 추측 X — 호날두 사례)
+  · "○○가 데뷔 후 첫 1위" (확인 안 된 사실)
+  · "○○ 사상 최초" 류 단정 (출처 명시 없으면 X)
+- 같은 문장을 두 번 이상 반복하지 마라. 같은 내용을 다른 표현으로 풀어도 안 됨.
+- 본문에서 같은 어구(20자 이상)가 3번 등장하면 글 자체가 거부된다.
+
 [가독성 절대 원칙 — Yoast SEO Readability 점수 향상]
 - **한 문장 60자 이내**. 길어지면 두 문장으로 나눠라. 쉼표로 길게 잇지 말 것.
 - **연결어를 자연스럽게 분포**: '근데', '그런데', '솔직히', '그래서', '그러고 보면',
@@ -4017,6 +4083,13 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     truncated, trunc_reason = detect_truncated_body(content)
     if truncated:
         log(f"   ⚠️ 본문 잘림 감지: {trunc_reason} — 발행 거부")
+        return None, None
+
+    # 정두릅 결정 2026-06: 같은 어구 반복 검출 (포르투갈 vs 우즈베키스탄 사고)
+    # Llama 8B가 같은 문장을 5~6회 반복하는 사고
+    repeated, repeated_list = detect_repeated_content(content, min_phrase_len=25, min_repeats=3)
+    if repeated:
+        log(f"   ⚠️ 본문 같은 어구 반복 감지: {repeated_list} — 발행 거부 (Llama 반복 사고)")
         return None, None
 
     # 정두릅 결정 2026-06: 알맹이 부족 검사 (이재성 사고)
