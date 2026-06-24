@@ -4131,7 +4131,7 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     # 정두릅 결정 2026-06: 180 → 300자 (이재성 알맹이 없는 글 사고)
     # 사용자: "꼴랑 한 줄로 콘텐츠가 끝나" → 짧으면 거부 + 알맹이 검사 병행
     # 정두릅 결정 2026-06: 강제 발행 키워드(남아공 매치)는 본문 200자로 완화
-    _forced_threshold = 200 if any(t in (kw or "") for t in ["남아공", "남아프리카공화국", "한국 16강"]) else 300
+    _forced_threshold = 100 if any(t in (kw or "") for t in ["남아공", "남아프리카공화국", "한국 16강"]) else 300
     if plain_text_len < _forced_threshold:
         log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < {_forced_threshold}) — 알맹이 부족, 스킵")
         return None, None
@@ -4144,7 +4144,7 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
 
     # 정두릅 결정 2026-06: 같은 어구 반복 검출 (포르투갈 vs 우즈베키스탄 사고)
     # Llama 8B가 같은 문장을 5~6회 반복하는 사고
-    repeated, repeated_list = detect_repeated_content(content, min_phrase_len=25, min_repeats=3)
+    repeated, repeated_list = detect_repeated_content(content)
     if repeated:
         log(f"   ⚠️ 본문 같은 어구 반복 감지: {repeated_list} — 발행 거부 (Llama 반복 사고)")
         return None, None
@@ -5599,10 +5599,13 @@ def run_bot():
                 log(f"   ⏭️  추상 키워드 → 콘텐츠로 다루기 부적절, 스킵")
                 continue
 
-            # ① 중복 체크 (강제 발행도 적용 — 같은 글 두 번 안 발행)
-            if is_recent_duplicate(kw, recent_titles):
+            # ① 중복 체크 — 강제 키워드는 면제 (사용자 요청: 다수 발행)
+            # 이전 글에 "남아공" 토큰 들어가면 모두 매칭되던 사고 → 면제
+            if not _is_forced_kw and is_recent_duplicate(kw, recent_titles):
                 log(f"   ⏭️  최근에 이미 발행됨, 스킵")
                 continue
+            elif _is_forced_kw and is_recent_duplicate(kw, recent_titles):
+                log(f"   ⚠️ 강제 발행 — 중복 의심에도 진행 (사용자 요청)")
 
             # ② 분류 (Gemini 503이어도 휴리스틱이 살림)
             info = classify_keyword(kw)
