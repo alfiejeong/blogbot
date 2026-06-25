@@ -991,24 +991,6 @@ def build_keyword_pool(d_df):
     """
     pool = []
 
-    # 정두릅 결정 2026-06: 한국 vs 남아공 월드컵 경기일 강제 발행 (사용자 요청)
-    # "다수의 콘텐츠를 강제 발행. 관련 콘텐츠 사진 제한 일시 해제"
-    FORCED_PUBLISH_KEYWORDS = [
-        "한국 vs 남아공", "한국 남아공", "남아공 vs 한국",
-        "한국 vs 남아프리카공화국", "한국 남아프리카공화국",
-        "남아공전", "남아프리카공화국전",
-        "홍명보호 남아공", "한국 대표팀 남아공",
-        # 한국 선수 위주 + 남아공 컨텍스트 (이미지·뉴스 더 정확히 매칭)
-        "손흥민 남아공", "이강인 남아공", "황인범 남아공",
-        "황희찬 남아공", "조현우 남아공", "오현규 남아공",
-        "이재성 남아공", "정상빈 남아공",
-        # 경우의 수·결과
-        "한국 월드컵 진출 경우의 수", "한국 16강 진출",
-        "한국 vs 남아공 예상 라인업", "한국 vs 남아공 결과",
-    ]
-    pool.extend(FORCED_PUBLISH_KEYWORDS)
-    log(f"   ⚽ 한국-남아공 강제 발행 키워드 {len(FORCED_PUBLISH_KEYWORDS)}개 풀 최우선 진입")
-
     # 1) 트렌드 RSS — 25개로 확대 시도 (실제로는 시간대 따라 10~25개)
     pool.extend(get_google_trends()[:25])
 
@@ -3310,13 +3292,7 @@ def filter_images_by_vision(pool, kw, category):
     if not VISION_VERIFY_ENABLED or not pool:
         return pool
     threshold = get_vision_threshold(category)
-    # 정두릅 결정 2026-06: 강제 발행 키워드는 Vision 임계값 더 낮춤 (사진 채택 확률 ↑)
-    _is_forced_for_img = any(t in (kw or "") for t in ["남아공", "남아프리카공화국", "한국 16강"])
-    if _is_forced_for_img:
-        threshold = max(1, threshold - 2)  # 2점 낮춤 (sports 2→1, ent 6→4)
-        log(f"   🔍 Vision 검증: {len(pool)}장 (임계값 {threshold}/10, 카테고리={category}) [강제 -2]")
-    else:
-        log(f"   🔍 Vision 검증: {len(pool)}장 (임계값 {threshold}/10, 카테고리={category})")
+    log(f"   🔍 Vision 검증: {len(pool)}장 (임계값 {threshold}/10, 카테고리={category})")
     accepted = []
     # 출처별 신뢰도 — Vision 실패 시 통과 여부 결정
     # 강한 출처: 캡션·OG 등으로 이미 검증됨 → Vision 실패해도 통과
@@ -3346,18 +3322,10 @@ def filter_images_by_vision(pool, kw, category):
             visually_safe_cat = category in ("sports", "auto", "game")
             _trusted_ent = set(globals().get("KNOWN_ENTERTAINMENT", []))
             kw_trusted_ent = kw in _trusted_ent
-            # 정두릅 결정 2026-06: 강제 발행 키워드(남아공 매치)는 모든 카테고리에서 wiki 신뢰
-            # 사용자 지시: "출처 완화로 이미지는 무조건 들어가게"
-            _is_forced_for_img = any(t in (kw or "") for t in ["남아공", "남아프리카공화국", "한국 16강"])
-            allow_wiki = (
-                visually_safe_cat or
-                (category == "entertainment" and kw_trusted_ent) or
-                _is_forced_for_img  # 강제 키워드는 모든 카테고리 wiki 신뢰
-            )
+            allow_wiki = visually_safe_cat or (category == "entertainment" and kw_trusted_ent)
             if is_wiki and allow_wiki:
                 accepted.append(img)
-                tag = " [강제]" if _is_forced_for_img else ""
-                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}){tag}: {credit_short}")
+                log(f"   ⚠️ Vision quota 소진 — {source} 신뢰 (cat={category}): {credit_short}")
             else:
                 log(f"   ✗ Vision 실패 + 약한 출처({source}) → 거부: {credit_short}")
         elif score >= threshold:
@@ -3480,12 +3448,9 @@ def collect_images(queries, kw, category, target=5, news_items=None,
     pool = filter_images_by_vision(pool, kw, category)
 
     # Tier 5: Picsum 필러 — 사용자 정책: USE_STOCK_PHOTOS=False면 picsum도 X
-    # 정두릅 결정 2026-06: 강제 발행 키워드는 picsum 폴백 허용 (사용자 지시: 출처 완화)
-    _is_forced_for_img = any(t in (kw or "") for t in ["남아공", "남아프리카공화국", "한국 16강"])
-    if not is_place and (USE_STOCK_PHOTOS or _is_forced_for_img) and len(pool) < target:
+    if not is_place and USE_STOCK_PHOTOS and len(pool) < target:
         add(get_picsum_filler(kw, n=target - len(pool) + 1))
-        tag = " [강제]" if _is_forced_for_img and not USE_STOCK_PHOTOS else ""
-        log(f"   [tier5 picsum]{tag} {len(pool)}장")
+        log(f"   [tier5 picsum] {len(pool)}장")
     elif len(pool) == 0:
         log(f"   ⛔ {category} — 진짜 사진 0장. stock photo 폴백 안 씀 → 발행 스킵 예정")
 
@@ -4130,10 +4095,8 @@ H2 헤딩 4개. 각 H2 직후 [IMG] 한 줄.
     plain_text_len = len(re.sub(r"<[^>]+>|\[\s*IMG\s*\]", "", content))
     # 정두릅 결정 2026-06: 180 → 300자 (이재성 알맹이 없는 글 사고)
     # 사용자: "꼴랑 한 줄로 콘텐츠가 끝나" → 짧으면 거부 + 알맹이 검사 병행
-    # 정두릅 결정 2026-06: 강제 발행 키워드(남아공 매치)는 본문 200자로 완화
-    _forced_threshold = 100 if any(t in (kw or "") for t in ["남아공", "남아프리카공화국", "한국 16강"]) else 300
-    if plain_text_len < _forced_threshold:
-        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < {_forced_threshold}) — 알맹이 부족, 스킵")
+    if plain_text_len < 300:
+        log(f"   ⚠️ 본문이 너무 짧음 ({plain_text_len}자 < 300) — 알맹이 부족, 스킵")
         return None, None
 
     # 정두릅 결정 2026-06: 본문 단어 절단 감지 (리 유나이티드 오타 사고)
@@ -5565,47 +5528,33 @@ def run_bot():
             break
 
         # 정두릅 결정 2026-06: 사이클당 키워드 처리 한도 — 15분 timeout 안전망
-        # 강제 발행 키워드(남아공 매치)는 한도 면제
         _kw_processed = locals().get('_kw_processed', 0) + 1
-        _kw_is_forced = any(t in kw for t in ["남아공", "남아프리카공화국", "한국 16강"])
-        if _kw_processed > 15 and not _kw_is_forced:
-            remaining_forced = [k for k in keywords[keywords.index(kw)+1:] 
-                                if any(t in k for t in ["남아공", "남아프리카공화국", "한국 16강"])]
-            if not remaining_forced:
-                log(f"\n⏰ 1회 키워드 처리 한도 15개 도달 — 종료")
-                break
-            log(f"   ⏭️ 한도 도달 — 강제 키워드 {len(remaining_forced)}개만 처리 계속")
-            continue
+        if _kw_processed > 15:
+            log(f"\n⏰ 1회 키워드 처리 한도 15개 도달 — 다음 사이클에서 나머지 처리")
+            break
 
         log(f"\n🔥 [{kw}] 처리 시작")
         try:
-            # 정두릅 결정 2026-06: 한국-남아공 강제 발행 키워드 플래그 (사용자 요청)
-            _is_forced_kw = any(t in kw for t in ["남아공", "남아프리카공화국", "한국 16강"])
-            if _is_forced_kw:
-                log(f"   ⚽ 강제 발행 모드 — 차단 단계 대거 면제")
-
-            # ⓪-A 부적합 토픽 차단 (강제 발행 키워드는 면제)
-            if not _is_forced_kw and is_nonfit_topic(kw):
+            # ⓪-A 부적합 토픽 차단
+            if is_nonfit_topic(kw):
                 log(f"   ⏭️  부적합 토픽 (코인/매체/정치/IT/날씨 등) → 스킵")
                 continue
 
-            # ⓪-A2 모호한 영문 브랜드+지역 키워드 차단 (강제 발행 면제)
-            if not _is_forced_kw and is_vague_english_keyword(kw):
+            # ⓪-A2 모호한 영문 브랜드+지역 키워드 차단
+            if is_vague_english_keyword(kw):
                 log(f"   ⏭️  모호한 영문 브랜드+지역 키워드 → 알맹이 없음, 스킵: {kw}")
                 continue
 
-            # ⓪-B 추상 키워드 차단 (강제 발행 면제)
-            if not _is_forced_kw and is_too_abstract(kw):
+            # ⓪-B 추상 키워드 차단
+            if is_too_abstract(kw):
                 log(f"   ⏭️  추상 키워드 → 콘텐츠로 다루기 부적절, 스킵")
                 continue
 
             # ① 중복 체크 — 강제 키워드는 면제 (사용자 요청: 다수 발행)
             # 이전 글에 "남아공" 토큰 들어가면 모두 매칭되던 사고 → 면제
-            if not _is_forced_kw and is_recent_duplicate(kw, recent_titles):
+            if is_recent_duplicate(kw, recent_titles):
                 log(f"   ⏭️  최근에 이미 발행됨, 스킵")
                 continue
-            elif _is_forced_kw and is_recent_duplicate(kw, recent_titles):
-                log(f"   ⚠️ 강제 발행 — 중복 의심에도 진행 (사용자 요청)")
 
             # ② 분류 (Gemini 503이어도 휴리스틱이 살림)
             info = classify_keyword(kw)
@@ -5646,8 +5595,7 @@ def run_bot():
                 list(globals().get("KNOWN_ENTERTAINMENT", [])) +
                 KNOWN_IT_TRUSTED
             )
-            # 정두릅 결정 2026-06: 강제 발행 키워드도 신뢰 면제 (남아공 매치)
-            _is_trusted = (kw in _trusted_kw_set) or _is_forced_kw
+            _is_trusted = kw in _trusted_kw_set
 
             # ③-C 동명이인 모호 키워드 감지 (이수진·이시형처럼 여러 분야 인물)
             if not _is_trusted and detect_homonym_keyword(kw, news_items):
@@ -5694,17 +5642,11 @@ def run_bot():
             min_ctx = 350 if is_person else 200
             # entertainment/sports는 모두 사실 기반 글이라 컨텍스트 필수
             if info["category"] in ("entertainment", "sports") and len(news_ctx) < min_ctx:
-                if _is_forced_kw:
-                    log(f"   ⚠️ 강제 발행 — 뉴스 컨텍스트 짧지만 진행 ({len(news_ctx)}자)")
-                else:
                     log(f"   ⏭️  뉴스 컨텍스트 {len(news_ctx)}자 < {min_ctx} (인물여부={is_person}) → 스킵")
                     continue
 
             # ④ 이미지 수집 (Tier 0: news_items 재사용, 메타·광고·매체촬영·제3자 사진 차단)
             queries = info.get("image_queries") or [kw]
-            # 정두릅 결정 2026-06: 강제 키워드는 image_queries에 매치 단어 강제 박음
-            if _is_forced_kw:
-                queries = [kw, "Korea South Africa football", "Korea World Cup", "한국 남아공"] + queries
             images = collect_images(
                 queries, kw=kw, category=info["category"],
                 target=TOTAL_IMAGES, news_items=news_items,
@@ -5713,7 +5655,6 @@ def run_bot():
             log(f"   → 이미지 총 {len(images)}장 확보 (목표 {TOTAL_IMAGES}장)")
 
             if len(images) < 1:
-                # 정두릅 결정 2026-06: 이미지 0장이면 스킵 (사용자 지시: "0건 발행하지마. 출처 완화만 해라")
                 log("   ⛔ 이미지 0장, 스킵")
                 continue
             # 핫플/맛집은 가게 사진이 콘텐츠 핵심 — 최소 1장 보장
