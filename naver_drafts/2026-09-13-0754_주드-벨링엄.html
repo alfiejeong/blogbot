@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주드 벨링엄, 폼 미쳤다? 득점 비결 분석!</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', sans-serif;
+         max-width: 720px; margin: 0 auto; padding: 16px; line-height: 1.7;
+         color: #222; word-break: keep-all; }
+  h1 { font-size: 22px; margin-top: 28px; }
+  p { font-size: 16px; }
+  .actions { position: sticky; top: 0; background: #fff;
+              padding: 12px 0; border-bottom: 1px solid #eee; z-index: 10; }
+  .btn { display: block; width: 100%; padding: 16px; margin: 8px 0;
+          border: 0; border-radius: 12px; font-size: 16px; font-weight: 600;
+          cursor: pointer; text-align: center; text-decoration: none; }
+  .btn-title { background: #4a90e2; color: #fff; }
+  .btn-body { background: #ff5722; color: #fff; }
+  .btn-tags { background: #ffa726; color: #fff; }
+  .btn-naver { background: #03c75a; color: #fff; }
+  .btn.copied { background: #2ecc71 !important; }
+  .meta { background:#f6f6f6; padding:10px; border-radius:8px;
+           font-size:13px; color:#666; margin-top: 20px; }
+  .tags-box { margin-top:18px; padding:14px; background:#fff5e6;
+               border-radius:8px; font-size:14px; }
+  .preview-title { background:#eef5ff; padding:12px; border-radius:8px;
+                    margin: 12px 0; font-weight: 700; }
+  .help { background:#e8f4ff; padding:12px; border-radius:8px;
+           font-size:13px; margin-bottom:14px; line-height: 1.6; }
+  .img-bank { margin-top: 24px; padding: 16px; background: #f9f9f9;
+               border-radius: 12px; border: 1px solid #eee; }
+  .bank-h3 { font-size: 15px; margin: 0 0 6px; color: #444; }
+  .bank-desc { font-size: 13px; color: #666; line-height: 1.5; margin: 0 0 12px; }
+  .bank-item { margin: 14px 0; }
+  .bank-num { font-size: 12px; color: #999; margin-bottom: 4px; font-weight: 600; }
+  .bank-item img { max-width: 100%; height: auto;
+                    border-radius: 8px; display: block; }
+</style></head><body>
+
+
+
+<div class="help">
+✅ <b>PC 웹에서</b><br>
+1. <b>본문 복사</b> 탭 → 네이버 글쓰기 본문에 붙여넣기 (이미지 자동 첨부)<br>
+2. <b>제목 복사</b> 탭 → 네이버 제목 칸에 붙여넣기<br>
+3. <b>태그 복사</b> 탭 → 네이버 태그 칸에 붙여넣기<br>
+4. 카테고리: <b>스포츠</b> 선택 후 발행<br>
+<br>
+📱 <b>네이버 블로그 앱(모바일)에서는</b> 외부 URL 이미지를 인식하지 못합니다.
+본문 복사·붙여넣기 후, 페이지 아래 <b>📥 모바일용 이미지</b> 섹션의 사진을 길게 눌러 저장한 다음, 앱의 사진 첨부에서 갤러리로 첨부하세요.
+</div>
+
+<div class="actions">
+  <button class="btn btn-body" onclick="copyBodyHTML(this)">📋 본문 복사 (이미지 포함)</button>
+  <button class="btn btn-title" onclick="copyTextFromId(this, 'data-title')">📌 제목 복사</button>
+  <button class="btn btn-tags" onclick="copyTextFromId(this, 'data-tags')">🏷 태그 복사</button>
+  <a class="btn btn-naver" href="https://blog.naver.com/whyhotmagazine?Redirect=Write" target="_blank">🚀 네이버 블로그 글쓰기 열기</a>
+</div>
+
+<div class="preview-title">제목: <span id="data-title">주드 벨링엄, 폼 미쳤다? 득점 비결 분석!</span></div>
+
+<div id="data-body">
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">요즘 왜 이렇게 주드 벨링엄 얘기가 많이 들리는 걸까요? 👀 그 인기 비결, 핵심만 쏙쏙 뽑아 알아봤어요.</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">✨ 득점 행진, 감독도 놀라다</h3>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">최근 벨링엄 경기 보고 있으면 진짜 눈을 뗄 수가 없어요! 지난 경기에서는 전반 45분 만에 음바페, 카레라스에 이어 벨링엄까지 득점포를 가동하며 팀을 3-0으로 앞서게 했죠. 상대팀 라요 바예카노의 추격도 거셌지만 결국 승패를 뒤집지는 못했답니다.</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:20px 0;text-align:center;"><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286024_59d0a617c2.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#fff5e6;padding:14px 16px;border-radius:10px;margin:20px 0;font-weight:600;color:#b35e00;line-height:1.6;">💡 '자유로운 역할'이 비결?</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">조제 모리뉴 감독 체제에서 벨링엄이 날아오르는 모습인데요. 2026-2027 시즌 초반부터 맹활약을 펼치는 비결은 바로 역할에 제약 없이 자유롭게 움직이는 데 있는 것 같아요. 지난 31일 말라가와의 경기에서도 역시나 좋은 모습을 보여줬다고 하니, 앞으로가 더욱 기대되네요!</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">💬 '모델 여친' 영향일까?</h3>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">여자친구인 미국 모델 애슐린 카스트로와의 달달한 SNS 소통도 화제예요. 지난달 28일 영국 더선 보도에 따르면, 벨링엄이 애슐린 카스트로의 미모에 감탄하는 댓글을 남기며 많은 이들의 시선을 사로잡았다고 하는데요. 혹시 이런 부분도 경기력에 긍정적인 영향을 주는 걸까요? 🤔</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:20px 0;text-align:center;"><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286025_b87a70dd09.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">📍 재계약 소식도 벌써부터</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;">레알 마드리드가 벨링엄에게 완전히 빠진 모양이에요. 2029년까지 계약 기간이 남아있음에도 불구하고, 벌써부터 새로운 계약을 진지하게 논의하고 있다는 소식이 들려오더라고요. 글로벌 매체 '트리뷰나' 보도에 따르면, 구단에서 정말 파격적인 조건을 제시할 수도 있다고 하니, 앞으로 벨링엄의 활약을 더 지켜봐야겠어요!</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">📍 자세한 글:</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://whyhot.kr" style="color:#1f6feb;text-decoration:underline;">https://whyhot.kr</a></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:20px 0;text-align:center;"><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286025_d8bc980f1c.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">🚗 주차 정보:</p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://거지주차.com" style="color:#1f6feb;text-decoration:underline;">https://거지주차.com</a></p>
+<p style="margin:10px 0;line-height:1;">&nbsp;</p>
+</div>
+
+<div class="img-bank"><h3 class="bank-h3">📥 모바일용 이미지 (꾸욱 눌러 저장)</h3><p class="bank-desc">네이버 블로그 앱은 외부 URL 이미지를 인식하지 못합니다. 본문 복사·붙여넣기 후 아래 사진을 길게 눌러 저장한 다음, 네이버 앱의 사진 첨부에서 갤러리로 첨부하세요.</p><div class="bank-item"><div class="bank-num">1 / 3 · 꾸욱 눌러 저장</div><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286024_59d0a617c2.jpg" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></div>
+<div class="bank-item"><div class="bank-num">2 / 3 · 꾸욱 눌러 저장</div><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286025_b87a70dd09.jpg" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></div>
+<div class="bank-item"><div class="bank-num">3 / 3 · 꾸욱 눌러 저장</div><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286025_d8bc980f1c.jpg" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></div></div>
+
+<div class="tags-box">
+<b>태그</b>: <span id="data-tags">#오늘의이슈 #트렌드 #화제 #실시간이슈 #와이핫 #주드벨링엄 #레알마드리드 #모리뉴 #애슐린카스트로 #스포츠이슈</span>
+</div>
+
+<div class="meta">
+카테고리: 스포츠 · 원본: https://whyhot.kr/?p=3475 · 2026-09-13 07:54
+</div>
+
+<script>
+const BODY_HTML = '<p style="margin:14px 0;line-height:1.75;font-size:16px;">요즘 왜 이렇게 주드 벨링엄 얘기가 많이 들리는 걸까요? 👀 그 인기 비결, 핵심만 쏙쏙 뽑아 알아봤어요.</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">✨ 득점 행진, 감독도 놀라다</h3>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">최근 벨링엄 경기 보고 있으면 진짜 눈을 뗄 수가 없어요! 지난 경기에서는 전반 45분 만에 음바페, 카레라스에 이어 벨링엄까지 득점포를 가동하며 팀을 3-0으로 앞서게 했죠. 상대팀 라요 바예카노의 추격도 거셌지만 결국 승패를 뒤집지는 못했답니다.</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:20px 0;text-align:center;"><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286024_59d0a617c2.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#fff5e6;padding:14px 16px;border-radius:10px;margin:20px 0;font-weight:600;color:#b35e00;line-height:1.6;">💡 \'자유로운 역할\'이 비결?</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">조제 모리뉴 감독 체제에서 벨링엄이 날아오르는 모습인데요. 2026-2027 시즌 초반부터 맹활약을 펼치는 비결은 바로 역할에 제약 없이 자유롭게 움직이는 데 있는 것 같아요. 지난 31일 말라가와의 경기에서도 역시나 좋은 모습을 보여줬다고 하니, 앞으로가 더욱 기대되네요!</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<h3 style="font-size:18px;color:#2c5fa5;border-left:4px solid #4a90e2;padding:6px 0 6px 12px;margin:28px 0 12px;font-weight:700;line-height:1.4;">💬 \'모델 여친\' 영향일까?</h3>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">여자친구인 미국 모델 애슐린 카스트로와의 달달한 SNS 소통도 화제예요. 지난달 28일 영국 더선 보도에 따르면, 벨링엄이 애슐린 카스트로의 미모에 감탄하는 댓글을 남기며 많은 이들의 시선을 사로잡았다고 하는데요. 혹시 이런 부분도 경기력에 긍정적인 영향을 주는 걸까요? 🤔</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:20px 0;text-align:center;"><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286025_b87a70dd09.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">📍 재계약 소식도 벌써부터</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;">레알 마드리드가 벨링엄에게 완전히 빠진 모양이에요. 2029년까지 계약 기간이 남아있음에도 불구하고, 벌써부터 새로운 계약을 진지하게 논의하고 있다는 소식이 들려오더라고요. 글로벌 매체 \'트리뷰나\' 보도에 따르면, 구단에서 정말 파격적인 조건을 제시할 수도 있다고 하니, 앞으로 벨링엄의 활약을 더 지켜봐야겠어요!</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">📍 자세한 글:</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://whyhot.kr" style="color:#1f6feb;text-decoration:underline;">https://whyhot.kr</a></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:20px 0;text-align:center;"><img src="https://alfiejeong.github.io/blogbot/images/2026-09/1789286025_d8bc980f1c.jpg" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:8px;" alt="주드 벨링엄, 폼 미쳤다? 득점 비결 분석!"></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="background:#f0f8ff;padding:10px 14px;border-radius:8px;margin:14px 0;color:#1f6feb;line-height:1.6;">🚗 주차 정보:</p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>\n<p style="margin:14px 0;line-height:1.75;font-size:16px;"><a href="https://거지주차.com" style="color:#1f6feb;text-decoration:underline;">https://거지주차.com</a></p>\n<p style="margin:10px 0;line-height:1;">&nbsp;</p>';
+const BODY_PLAIN = document.getElementById('data-body').innerText;
+
+async function copyBodyHTML(btn) {
+  const html = BODY_HTML;
+  const text = BODY_PLAIN;
+  const original = btn.textContent;
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      const data = [new ClipboardItem({
+        'text/html': new Blob([html], {type: 'text/html'}),
+        'text/plain': new Blob([text], {type: 'text/plain'})
+      })];
+      await navigator.clipboard.write(data);
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+    btn.textContent = '✓ 복사됨! 네이버 본문에 붙여넣기';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }, 3000);
+  } catch (e) {
+    alert('복사 실패: ' + e.message + '\n수동으로 본문 영역을 길게 눌러 복사하세요.');
+  }
+}
+
+async function copyTextFromId(btn, id) {
+  const text = document.getElementById(id).textContent;
+  const original = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = '✓ 복사됨!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove('copied');
+    }, 2000);
+  } catch (e) {
+    alert('복사 실패: ' + e.message);
+  }
+}
+</script>
+
+</body></html>
